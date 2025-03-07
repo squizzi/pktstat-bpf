@@ -29,6 +29,7 @@
 #include <bpf/bpf_tracing.h>
 
 #define MAX_ENTRIES 4096
+#define MAX_DNS_NAME_LENGTH 256
 
 #define s6_addr in6_u.u6_addr8
 #define s6_addr16 in6_u.u6_addr16
@@ -45,6 +46,11 @@
 
 #define OK 1
 #define NOK 0
+
+#define DNS_CACHE_HIT 1
+#define DNS_CACHE_MISS 2
+
+#define DNS_RESPONSE_THRESHOLD 1000000 // 1ms in nanoseconds
 
 // Map key struct for IP traffic
 typedef struct statkey_t {
@@ -70,6 +76,86 @@ struct {
   __type(key, statkey);
   __type(value, statvalue);
 } pkt_count SEC(".maps");
+
+// DNS query types we care about
+#define DNS_TYPE_A 1
+#define DNS_TYPE_AAAA 28
+#define DNS_TYPE_CNAME 5
+
+// Structure to hold DNS query information
+struct dns_query {
+    __u32 pid;
+    __u16 qtype;
+    char qname[MAX_DNS_NAME_LENGTH];
+    __u64 timestamp;
+};
+
+// Structure to hold DNS response information
+struct dns_response {
+    __u32 pid;
+    __u16 qtype;
+    char qname[MAX_DNS_NAME_LENGTH];
+    union {
+        __be32 ipv4;
+        struct in6_addr ipv6;
+    } addr;
+    __u64 timestamp;
+};
+
+// Map to store DNS queries
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 10000);
+    __type(key, __u32);  // Use transaction ID as key
+    __type(value, struct dns_query);
+} dns_queries SEC(".maps");
+
+// Map to store DNS responses
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 10000);
+    __type(key, __u32);  // Use transaction ID as key
+    __type(value, struct dns_response);
+} dns_responses SEC(".maps");
+
+// Structure to hold DNS cache event information
+struct dns_cache_event {
+    __u32 pid;
+    __u8 event_type;  // DNS_CACHE_HIT or DNS_CACHE_MISS
+    char qname[MAX_DNS_NAME_LENGTH];
+    __u64 timestamp;
+};
+
+// Map to store DNS cache events
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 10000);
+    __type(key, __u32);
+    __type(value, struct dns_cache_event);
+} dns_cache_events SEC(".maps");
+
+// Map to store DNS query timestamps
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 10000);
+    __type(key, __u32);  // PID as key
+    __type(value, __u64); // Timestamp
+} dns_query_timestamps SEC(".maps");
+
+// Add per-CPU array maps for large structures
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct dns_cache_event);
+} dns_event_heap SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct dns_response);
+} dns_response_heap SEC(".maps");
 
 // IPv4-mapped IPv6 address prefix (for V4MAPPED conversion)
 static const __u8 ip4in6[] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff};
@@ -151,7 +237,8 @@ static inline int process_ip4(struct iphdr *ip4, void *data_end, statkey *key) {
 }
 
 /**
- * Process an IPv6 packet and extract relevant information to populate the key.
+ * Process an IPv6 packet and extract relevant information to populate
+ * the key.
  *
  * @param ip6 pointer to the start of the IPv6 header
  * @param data_end pointer to the end of the packet data
@@ -1030,5 +1117,245 @@ int BPF_KPROBE(rawv6_sendmsg, struct sock *sk, struct msghdr *msg, size_t len) {
   return 0;
 }
 #endif
+
+// Fix parse_dns_name function
+static __always_inline int parse_dns_name(void *data, void *data_end, 
+                                        char *name, int max_len) {
+    unsigned char *cursor = data;
+    char *name_cursor = name;
+    int len = 0;
+    int label_len;
+
+    // Fix pointer comparison by casting to uintptr_t
+    while ((void *)(cursor + 1) <= data_end) {
+        label_len = *cursor;
+        if (label_len == 0)
+            break;
+
+        cursor++;
+        // Fix pointer comparison
+        if ((void *)(cursor + label_len) > data_end)
+            return -1;
+
+        if (len + label_len + 1 > max_len)
+            return -1;
+
+        if (len > 0) {
+            *name_cursor = '.';
+            name_cursor++;
+            len++;
+        }
+
+        if (bpf_probe_read_kernel(name_cursor, label_len, cursor) < 0)
+            return -1;
+            
+        name_cursor += label_len;
+        len += label_len;
+        cursor += label_len;
+    }
+
+    if (len < max_len)
+        name[len] = '\0';
+
+    return len;
+}
+
+// DNS header structure
+struct dns_header {
+    __u16 transaction_id;
+    __u16 flags;
+    __u16 questions;
+    __u16 answer_rrs;
+    __u16 authority_rrs;
+    __u16 additional_rrs;
+};
+
+// DNS question structure
+struct dns_question {
+    __u16 qtype;
+    __u16 qclass;
+};
+
+SEC("kprobe/udp_recvmsg")
+int BPF_KPROBE(dns_recvmsg, struct sock *sk, struct msghdr *msg) {
+    if (!sk || !msg)
+        return 0;
+
+    // Get destination port safely
+    __u16 dport;
+    if (bpf_probe_read_kernel(&dport, sizeof(dport), &sk->__sk_common.skc_dport) < 0)
+        return 0;
+    
+    // Only process DNS traffic (port 53)
+    if (bpf_ntohs(dport) != 53)
+        return 0;
+
+    // Get current PID/TID
+    __u32 pid = bpf_get_current_pid_tgid() >> 32;
+    __u64 current_time = bpf_ktime_get_ns();
+
+    // Get pointer to per-CPU response structure
+    __u32 zero = 0;
+    struct dns_query *query = bpf_map_lookup_elem(&dns_event_heap, &zero);
+    if (!query)
+        return 0;
+
+    // Initialize query
+    query->pid = pid;
+    query->timestamp = current_time;
+
+    // Try to get the DNS name from the packet
+    void *data = NULL;
+    size_t len = 0;
+    
+    // Read base and len safely using BPF_CORE_READ
+    data = BPF_CORE_READ(msg, msg_iter.kvec->iov_base);
+    len = BPF_CORE_READ(msg, msg_iter.kvec->iov_len);
+
+    // Ensure we have enough data for DNS header
+    if (len >= sizeof(struct dns_header)) {
+        struct dns_header hdr;
+        if (bpf_probe_read_kernel(&hdr, sizeof(hdr), data) == 0) {
+            // Skip DNS header to get to the question section
+            unsigned char *question = data + sizeof(struct dns_header);
+            
+            // Parse the DNS name
+            if (parse_dns_name(question, data + len, query->qname, sizeof(query->qname)) < 0) {
+                // If parsing fails, use process name as fallback
+                bpf_get_current_comm(query->qname, sizeof(query->qname));
+            }
+        }
+    }
+
+    // If we couldn't get the DNS name, use process name as fallback
+    if (query->qname[0] == '\0') {
+        bpf_get_current_comm(query->qname, sizeof(query->qname));
+    }
+
+    // Store query in map
+    bpf_map_update_elem(&dns_queries, &pid, query, BPF_ANY);
+
+    // Store timestamp for cache detection
+    bpf_map_update_elem(&dns_query_timestamps, &pid, &current_time, BPF_ANY);
+
+    return 0;
+}
+
+// Update DNS send message handler to preserve the DNS name
+SEC("kprobe/udp_sendmsg")
+int BPF_KPROBE(dns_sendmsg, struct sock *sk, struct msghdr *msg, size_t size) {
+    if (!sk)
+        return 0;
+
+    // Get source port safely
+    __u16 sport;
+    if (bpf_probe_read_kernel(&sport, sizeof(sport), &sk->__sk_common.skc_num) < 0)
+        return 0;
+    
+    // Only process DNS traffic (port 53)
+    if (sport != 53)
+        return 0;
+
+    // Get current PID/TID
+    __u32 pid = bpf_get_current_pid_tgid() >> 32;
+    __u64 current_time = bpf_ktime_get_ns();
+
+    // Check if we have a timestamp for this PID
+    __u64 *query_time = bpf_map_lookup_elem(&dns_query_timestamps, &pid);
+    if (!query_time)
+        return 0;
+
+    // Calculate response time
+    __u64 response_time = current_time - *query_time;
+    
+    // Get pointer to per-CPU event structure
+    __u32 zero = 0;
+    struct dns_cache_event *event = bpf_map_lookup_elem(&dns_event_heap, &zero);
+    if (!event)
+        return 0;
+
+    // Initialize event
+    event->pid = pid;
+    event->timestamp = current_time;
+    event->event_type = (response_time < DNS_RESPONSE_THRESHOLD) ? DNS_CACHE_HIT : DNS_CACHE_MISS;
+
+    // Try to get the original query name
+    struct dns_query *orig_query = bpf_map_lookup_elem(&dns_queries, &pid);
+    if (orig_query) {
+        __builtin_memcpy(event->qname, orig_query->qname, sizeof(event->qname));
+    } else {
+        // Fallback to process name if query not found
+        bpf_get_current_comm(event->qname, sizeof(event->qname));
+    }
+
+    // Store cache event
+    bpf_map_update_elem(&dns_cache_events, &pid, event, BPF_ANY);
+
+    // Get pointer to per-CPU response structure
+    struct dns_response *response = bpf_map_lookup_elem(&dns_response_heap, &zero);
+    if (response) {
+        response->pid = pid;
+        response->timestamp = current_time;
+        __builtin_memcpy(response->qname, event->qname, sizeof(response->qname));
+        bpf_map_update_elem(&dns_responses, &pid, response, BPF_ANY);
+    }
+
+    // Clean up
+    bpf_map_delete_elem(&dns_query_timestamps, &pid);
+    bpf_map_delete_elem(&dns_queries, &pid);
+
+    return 0;
+}
+
+// Function to check DNS cache status
+SEC("kprobe/udp_recvmsg")
+int BPF_KPROBE(dns_cache_lookup, struct sock *sk, struct msghdr *msg) {
+    if (!sk)
+        return 0;
+
+    // Get destination port safely using BPF_CORE_READ
+    __u16 dport;
+    if (bpf_probe_read_kernel(&dport, sizeof(dport), &sk->__sk_common.skc_dport) < 0)
+        return 0;
+    
+    // Only process DNS traffic (port 53)
+    if (bpf_ntohs(dport) != 53)
+        return 0;
+
+    // Get current PID/TID and timestamp
+    __u32 pid = bpf_get_current_pid_tgid() >> 32;
+    __u64 current_time = bpf_ktime_get_ns();
+
+    // Get pointer to per-CPU event structure
+    __u32 zero = 0;
+    struct dns_cache_event *event = bpf_map_lookup_elem(&dns_event_heap, &zero);
+    if (!event)
+        return 0;
+
+    // Initialize event
+    event->pid = pid;
+    event->timestamp = current_time;
+    event->event_type = DNS_CACHE_MISS;  // Default to cache miss
+
+    // Get process name
+    bpf_get_current_comm(event->qname, sizeof(event->qname));
+
+    // Check if we have a recent query from this PID
+    __u64 *last_query = bpf_map_lookup_elem(&dns_query_timestamps, &pid);
+    if (last_query) {
+        __u64 time_diff = current_time - *last_query;
+        if (time_diff < DNS_RESPONSE_THRESHOLD) {
+            event->event_type = DNS_CACHE_HIT;
+        }
+    }
+
+    // Store the event
+    bpf_map_update_elem(&dns_cache_events, &pid, event, BPF_ANY);
+    
+    // Update timestamp
+    bpf_map_update_elem(&dns_query_timestamps, &pid, &current_time, BPF_ANY);
+
+    return 0;
+}
 
 char __license[] SEC("license") = "Dual MIT/GPL";

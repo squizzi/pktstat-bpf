@@ -23,6 +23,7 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log"
@@ -38,6 +39,20 @@ import (
 	"github.com/cilium/ebpf/rlimit"
 	"github.com/hako/durafmt"
 )
+
+// Add new types for DNS tracking
+type dnsTracepoint struct {
+	name    string
+	program *ebpf.Program
+}
+
+// Add DNS cache event structure
+type dnsCacheEvent struct {
+	Pid       uint32
+	EventType uint8
+	Qname     [256]int8
+	Timestamp uint64
+}
 
 func main() {
 	parseFags()
@@ -79,6 +94,10 @@ func main() {
 			{kprobe: "icmp6_send", prog: objs.Icmp6Send},
 			{kprobe: "icmp_rcv", prog: objs.IcmpRcv},
 			{kprobe: "icmpv6_rcv", prog: objs.Icmpv6Rcv},
+			{kprobe: "udp_recvmsg", prog: objs.DnsRecvmsg},
+			{kprobe: "udp_sendmsg", prog: objs.DnsSendmsg},
+			// Add probes for DNS cache operations
+			{kprobe: "udp_recvmsg", prog: objs.DnsCacheLookup}, // Track DNS responses
 		}
 
 		links = startKProbes(hooks, links)
@@ -94,6 +113,21 @@ func main() {
 	defer cancel()
 
 	startTime := time.Now()
+
+	// Start DNS processing before the main loop if using kprobes
+	if *useKProbes {
+		log.Printf("Starting DNS monitoring...")
+		go func() {
+			for {
+				select {
+				case <-c1.Done():
+					return
+				case <-time.After(1 * time.Second):
+					processDNSData(objs)
+				}
+			}
+		}()
+	}
 
 	if *enableTUI {
 		drawTUI(objs, startTime)
@@ -154,28 +188,28 @@ func main() {
 //	[]link.Link: The updated slice of link.Link objects, including any newly attached KProbes.
 func startKProbes(hooks []kprobeHook, links []link.Link) []link.Link {
 	var l link.Link
+	var err error
 
-	err := features.HaveProgramType(ebpf.Kprobe)
+	// Check kprobe support
+	err = features.HaveProgramType(ebpf.Kprobe)
 	if errors.Is(err, ebpf.ErrNotSupported) {
 		log.Fatalf("KProbes are not supported on this kernel")
 	}
-
 	if err != nil {
 		log.Fatalf("Error checking KProbes support: %v", err)
 	}
 
+	// Attach kprobes
 	for _, kp := range hooks {
 		l, err = link.Kprobe(kp.kprobe, kp.prog, nil)
 		if err != nil {
 			log.Printf("Unable to attach %q KProbe: %v", kp.kprobe, err)
-
 			continue
 		}
-
 		links = append(links, l)
 	}
 
-	log.Printf("Using KProbes mode w/ PID/comm tracking")
+	log.Printf("Using KProbes mode w/ PID/comm tracking and DNS resolution tracing")
 
 	return links
 }
@@ -288,4 +322,68 @@ func startTC(objs counterObjects, iface *net.Interface, links []link.Link) []lin
 	log.Printf("Starting on interface %q using TC (Traffic Control) eBPF mode", *ifname)
 
 	return links
+}
+
+// Update processDNSData function
+func processDNSData(objs counterObjects) {
+	var (
+		dnsQuery   counterDnsQuery
+		dnsResp    counterDnsResponse
+		cacheEvent dnsCacheEvent
+		key        uint32
+	)
+
+	// Process DNS queries
+	iter := objs.DnsQueries.Iterate()
+	for iter.Next(&key, &dnsQuery) {
+		qnameBytes := make([]byte, 0, len(dnsQuery.Qname))
+		for _, b := range dnsQuery.Qname {
+			if b == 0 {
+				break
+			}
+			qnameBytes = append(qnameBytes, byte(b))
+		}
+		qname := string(qnameBytes)
+		log.Printf("DNS Query: PID=%d Type=%d Name=%s Time=%d",
+			dnsQuery.Pid, dnsQuery.Qtype, qname, dnsQuery.Timestamp)
+	}
+
+	// Process DNS responses
+	iter = objs.DnsResponses.Iterate()
+	for iter.Next(&key, &dnsResp) {
+		qnameBytes := make([]byte, 0, len(dnsResp.Qname))
+		for _, b := range dnsResp.Qname {
+			if b == 0 {
+				break
+			}
+			qnameBytes = append(qnameBytes, byte(b))
+		}
+		qname := string(qnameBytes)
+		var addr string
+		ip := make(net.IP, 4)
+		binary.BigEndian.PutUint32(ip, dnsResp.Addr.Ipv4)
+		addr = ip.String()
+
+		log.Printf("DNS Response: PID=%d Type=%d Name=%s Addr=%s Time=%d",
+			dnsResp.Pid, dnsResp.Qtype, qname, addr, dnsResp.Timestamp)
+	}
+
+	// Process DNS cache events
+	iter = objs.DnsCacheEvents.Iterate()
+	for iter.Next(&key, &cacheEvent) {
+		qnameBytes := make([]byte, 0, len(cacheEvent.Qname))
+		for _, b := range cacheEvent.Qname {
+			if b == 0 {
+				break
+			}
+			qnameBytes = append(qnameBytes, byte(b))
+		}
+		qname := string(qnameBytes)
+		eventType := "Cache Miss"
+		if cacheEvent.EventType == 1 {
+			eventType = "Cache Hit"
+		}
+		log.Printf("DNS Cache Event: PID=%d Type=%s Name=%s Time=%d",
+			cacheEvent.Pid, eventType, qname, cacheEvent.Timestamp)
+	}
 }

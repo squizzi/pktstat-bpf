@@ -12,6 +12,34 @@ import (
 	"github.com/cilium/ebpf"
 )
 
+type counterDnsCacheEvent struct {
+	Pid       uint32
+	EventType uint8
+	Qname     [256]int8
+	_         [3]byte
+	Timestamp uint64
+}
+
+type counterDnsQuery struct {
+	Pid       uint32
+	Qtype     uint16
+	Qname     [256]int8
+	_         [2]byte
+	Timestamp uint64
+}
+
+type counterDnsResponse struct {
+	Pid   uint32
+	Qtype uint16
+	Qname [256]int8
+	_     [2]byte
+	Addr  struct {
+		Ipv4 uint32
+		_    [12]byte
+	}
+	Timestamp uint64
+}
+
 type counterStatkey struct {
 	Srcip   struct{ In6U struct{ U6Addr8 [16]uint8 } }
 	Dstip   struct{ In6U struct{ U6Addr8 [16]uint8 } }
@@ -71,6 +99,9 @@ type counterSpecs struct {
 // It can be passed ebpf.CollectionSpec.Assign.
 type counterProgramSpecs struct {
 	IcmpSend        *ebpf.ProgramSpec `ebpf:"__icmp_send"`
+	DnsCacheLookup  *ebpf.ProgramSpec `ebpf:"dns_cache_lookup"`
+	DnsRecvmsg      *ebpf.ProgramSpec `ebpf:"dns_recvmsg"`
+	DnsSendmsg      *ebpf.ProgramSpec `ebpf:"dns_sendmsg"`
 	Icmp6Send       *ebpf.ProgramSpec `ebpf:"icmp6_send"`
 	IcmpRcv         *ebpf.ProgramSpec `ebpf:"icmp_rcv"`
 	Icmpv6Rcv       *ebpf.ProgramSpec `ebpf:"icmpv6_rcv"`
@@ -86,7 +117,13 @@ type counterProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type counterMapSpecs struct {
-	PktCount *ebpf.MapSpec `ebpf:"pkt_count"`
+	DnsCacheEvents     *ebpf.MapSpec `ebpf:"dns_cache_events"`
+	DnsEventHeap       *ebpf.MapSpec `ebpf:"dns_event_heap"`
+	DnsQueries         *ebpf.MapSpec `ebpf:"dns_queries"`
+	DnsQueryTimestamps *ebpf.MapSpec `ebpf:"dns_query_timestamps"`
+	DnsResponseHeap    *ebpf.MapSpec `ebpf:"dns_response_heap"`
+	DnsResponses       *ebpf.MapSpec `ebpf:"dns_responses"`
+	PktCount           *ebpf.MapSpec `ebpf:"pkt_count"`
 }
 
 // counterVariableSpecs contains global variables before they are loaded into the kernel.
@@ -115,11 +152,23 @@ func (o *counterObjects) Close() error {
 //
 // It can be passed to loadCounterObjects or ebpf.CollectionSpec.LoadAndAssign.
 type counterMaps struct {
-	PktCount *ebpf.Map `ebpf:"pkt_count"`
+	DnsCacheEvents     *ebpf.Map `ebpf:"dns_cache_events"`
+	DnsEventHeap       *ebpf.Map `ebpf:"dns_event_heap"`
+	DnsQueries         *ebpf.Map `ebpf:"dns_queries"`
+	DnsQueryTimestamps *ebpf.Map `ebpf:"dns_query_timestamps"`
+	DnsResponseHeap    *ebpf.Map `ebpf:"dns_response_heap"`
+	DnsResponses       *ebpf.Map `ebpf:"dns_responses"`
+	PktCount           *ebpf.Map `ebpf:"pkt_count"`
 }
 
 func (m *counterMaps) Close() error {
 	return _CounterClose(
+		m.DnsCacheEvents,
+		m.DnsEventHeap,
+		m.DnsQueries,
+		m.DnsQueryTimestamps,
+		m.DnsResponseHeap,
+		m.DnsResponses,
 		m.PktCount,
 	)
 }
@@ -135,6 +184,9 @@ type counterVariables struct {
 // It can be passed to loadCounterObjects or ebpf.CollectionSpec.LoadAndAssign.
 type counterPrograms struct {
 	IcmpSend        *ebpf.Program `ebpf:"__icmp_send"`
+	DnsCacheLookup  *ebpf.Program `ebpf:"dns_cache_lookup"`
+	DnsRecvmsg      *ebpf.Program `ebpf:"dns_recvmsg"`
+	DnsSendmsg      *ebpf.Program `ebpf:"dns_sendmsg"`
 	Icmp6Send       *ebpf.Program `ebpf:"icmp6_send"`
 	IcmpRcv         *ebpf.Program `ebpf:"icmp_rcv"`
 	Icmpv6Rcv       *ebpf.Program `ebpf:"icmpv6_rcv"`
@@ -149,6 +201,9 @@ type counterPrograms struct {
 func (p *counterPrograms) Close() error {
 	return _CounterClose(
 		p.IcmpSend,
+		p.DnsCacheLookup,
+		p.DnsRecvmsg,
+		p.DnsSendmsg,
 		p.Icmp6Send,
 		p.IcmpRcv,
 		p.Icmpv6Rcv,
