@@ -75,19 +75,22 @@ type counterSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type counterProgramSpecs struct {
-	IcmpSend         *ebpf.ProgramSpec `ebpf:"__icmp_send"`
-	CgroupSkbEgress  *ebpf.ProgramSpec `ebpf:"cgroup_skb_egress"`
-	CgroupSkbIngress *ebpf.ProgramSpec `ebpf:"cgroup_skb_ingress"`
-	CgroupSockCreate *ebpf.ProgramSpec `ebpf:"cgroup_sock_create"`
-	Icmp6Send        *ebpf.ProgramSpec `ebpf:"icmp6_send"`
-	IcmpRcv          *ebpf.ProgramSpec `ebpf:"icmp_rcv"`
-	Icmpv6Rcv        *ebpf.ProgramSpec `ebpf:"icmpv6_rcv"`
-	IpSendSkb        *ebpf.ProgramSpec `ebpf:"ip_send_skb"`
-	SkbConsumeUdp    *ebpf.ProgramSpec `ebpf:"skb_consume_udp"`
-	TcCountPackets   *ebpf.ProgramSpec `ebpf:"tc_count_packets"`
-	TcpCleanupRbuf   *ebpf.ProgramSpec `ebpf:"tcp_cleanup_rbuf"`
-	TcpSendmsg       *ebpf.ProgramSpec `ebpf:"tcp_sendmsg"`
-	XdpCountPackets  *ebpf.ProgramSpec `ebpf:"xdp_count_packets"`
+	IcmpSend           *ebpf.ProgramSpec `ebpf:"__icmp_send"`
+	CgroupSkbEgress    *ebpf.ProgramSpec `ebpf:"cgroup_skb_egress"`
+	CgroupSkbIngress   *ebpf.ProgramSpec `ebpf:"cgroup_skb_ingress"`
+	CgroupSockCreate   *ebpf.ProgramSpec `ebpf:"cgroup_sock_create"`
+	Icmp6Send          *ebpf.ProgramSpec `ebpf:"icmp6_send"`
+	IcmpRcv            *ebpf.ProgramSpec `ebpf:"icmp_rcv"`
+	Icmpv6Rcv          *ebpf.ProgramSpec `ebpf:"icmpv6_rcv"`
+	IpSendSkb          *ebpf.ProgramSpec `ebpf:"ip_send_skb"`
+	SkbConsumeUdp      *ebpf.ProgramSpec `ebpf:"skb_consume_udp"`
+	TcCountPackets     *ebpf.ProgramSpec `ebpf:"tc_count_packets"`
+	TcpCleanupRbuf     *ebpf.ProgramSpec `ebpf:"tcp_cleanup_rbuf"`
+	TcpRetransmitTimer *ebpf.ProgramSpec `ebpf:"tcp_retransmit_timer"`
+	TcpSendmsg         *ebpf.ProgramSpec `ebpf:"tcp_sendmsg"`
+	TcpV4Connect       *ebpf.ProgramSpec `ebpf:"tcp_v4_connect"`
+	TcpV6Connect       *ebpf.ProgramSpec `ebpf:"tcp_v6_connect"`
+	XdpCountPackets    *ebpf.ProgramSpec `ebpf:"xdp_count_packets"`
 }
 
 // counterMapSpecs contains maps before they are loaded into the kernel.
@@ -145,19 +148,22 @@ type counterVariables struct {
 //
 // It can be passed to loadCounterObjects or ebpf.CollectionSpec.LoadAndAssign.
 type counterPrograms struct {
-	IcmpSend         *ebpf.Program `ebpf:"__icmp_send"`
-	CgroupSkbEgress  *ebpf.Program `ebpf:"cgroup_skb_egress"`
-	CgroupSkbIngress *ebpf.Program `ebpf:"cgroup_skb_ingress"`
-	CgroupSockCreate *ebpf.Program `ebpf:"cgroup_sock_create"`
-	Icmp6Send        *ebpf.Program `ebpf:"icmp6_send"`
-	IcmpRcv          *ebpf.Program `ebpf:"icmp_rcv"`
-	Icmpv6Rcv        *ebpf.Program `ebpf:"icmpv6_rcv"`
-	IpSendSkb        *ebpf.Program `ebpf:"ip_send_skb"`
-	SkbConsumeUdp    *ebpf.Program `ebpf:"skb_consume_udp"`
-	TcCountPackets   *ebpf.Program `ebpf:"tc_count_packets"`
-	TcpCleanupRbuf   *ebpf.Program `ebpf:"tcp_cleanup_rbuf"`
-	TcpSendmsg       *ebpf.Program `ebpf:"tcp_sendmsg"`
-	XdpCountPackets  *ebpf.Program `ebpf:"xdp_count_packets"`
+	IcmpSend           *ebpf.Program `ebpf:"__icmp_send"`
+	CgroupSkbEgress    *ebpf.Program `ebpf:"cgroup_skb_egress"`
+	CgroupSkbIngress   *ebpf.Program `ebpf:"cgroup_skb_ingress"`
+	CgroupSockCreate   *ebpf.Program `ebpf:"cgroup_sock_create"`
+	Icmp6Send          *ebpf.Program `ebpf:"icmp6_send"`
+	IcmpRcv            *ebpf.Program `ebpf:"icmp_rcv"`
+	Icmpv6Rcv          *ebpf.Program `ebpf:"icmpv6_rcv"`
+	IpSendSkb          *ebpf.Program `ebpf:"ip_send_skb"`
+	SkbConsumeUdp      *ebpf.Program `ebpf:"skb_consume_udp"`
+	TcCountPackets     *ebpf.Program `ebpf:"tc_count_packets"`
+	TcpCleanupRbuf     *ebpf.Program `ebpf:"tcp_cleanup_rbuf"`
+	TcpRetransmitTimer *ebpf.Program `ebpf:"tcp_retransmit_timer"`
+	TcpSendmsg         *ebpf.Program `ebpf:"tcp_sendmsg"`
+	TcpV4Connect       *ebpf.Program `ebpf:"tcp_v4_connect"`
+	TcpV6Connect       *ebpf.Program `ebpf:"tcp_v6_connect"`
+	XdpCountPackets    *ebpf.Program `ebpf:"xdp_count_packets"`
 }
 
 func (p *counterPrograms) Close() error {
@@ -173,7 +179,10 @@ func (p *counterPrograms) Close() error {
 		p.SkbConsumeUdp,
 		p.TcCountPackets,
 		p.TcpCleanupRbuf,
+		p.TcpRetransmitTimer,
 		p.TcpSendmsg,
+		p.TcpV4Connect,
+		p.TcpV6Connect,
 		p.XdpCountPackets,
 	)
 }

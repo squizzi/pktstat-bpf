@@ -99,15 +99,30 @@ func drawTUI(objs counterObjects, startTime time.Time) {
 		SetTextColor(tcell.ColorYellow)
 	switch {
 	case *useCGroup != "":
-		infoView.SetText("CGroup eBPF mode w/ partial PID and comm tracking")
+		infoText := "CGroup eBPF mode w/ partial PID and comm tracking"
+		if *enableKube {
+			infoText += ", Kubernetes pod tracking enabled"
+		}
+		infoView.SetText(infoText)
 	case *useKProbes:
-		infoView.SetText("KProbes eBPF mode w/ PID and comm tracking")
+		infoText := "KProbes eBPF mode w/ PID and comm tracking"
+		if *enableKube {
+			infoText += ", Kubernetes pod tracking enabled"
+		}
+		infoView.SetText(infoText)
 	case *useXDP:
-		infoView.SetText(fmt.Sprintf("XDP (eXpress Data Path) eBPF mode %v on interface %v, only ingress stats",
-			*xdpMode, *ifname))
+		infoText := fmt.Sprintf("XDP (eXpress Data Path) eBPF mode %v on interface %v, only ingress stats",
+			*xdpMode, *ifname)
+		if *enableKube {
+			infoText += ", Kubernetes pod tracking enabled"
+		}
+		infoView.SetText(infoText)
 	default:
-		infoView.SetText(fmt.Sprintf("TC (Traffic Control) eBPF mode on interface %v", *ifname))
-
+		infoText := fmt.Sprintf("TC (Traffic Control) eBPF mode on interface %v", *ifname)
+		if *enableKube {
+			infoText += ", Kubernetes pod tracking enabled"
+		}
+		infoView.SetText(infoText)
 	}
 
 	// navigation
@@ -148,6 +163,8 @@ func drawTUI(objs counterObjects, startTime time.Time) {
 //   - Code (ICMP code, or 0 for non-ICMP packets)
 //   - PID (process ID)
 //   - Comm (process name)
+//   - Source Pod (when Kubernetes is enabled)
+//   - Destination Pod (when Kubernetes is enabled)
 //
 // Note that the table is cleared and recreated on each iteration, so any cell
 // attributes are lost on each iteration.
@@ -165,6 +182,14 @@ func updateStatsTable(app *tview.Application, table *tview.Table, tableSort *fun
 		"code",    // column 7
 		"pid",     // column 8
 		"comm",    // column 9
+	}
+
+	// Add Kubernetes headers if enabled
+	if *enableKube {
+		headers = append(headers,
+			"src-pod", // column 10
+			"dst-pod", // column 11
+		)
 	}
 
 	for {
@@ -261,6 +286,19 @@ func updateStatsTable(app *tview.Application, table *tview.Table, tableSort *fun
 					SetExpansion(1))
 
 				table.SetCell(i+1, 9, tview.NewTableCell("").
+					SetTextColor(tcell.ColorWhite).
+					SetExpansion(1))
+			}
+
+			// Add Kubernetes pod information if enabled
+			if *enableKube {
+				// Source pod information (column 10)
+				table.SetCell(i+1, 10, tview.NewTableCell(v.SourcePod).
+					SetTextColor(tcell.ColorWhite).
+					SetExpansion(1))
+
+				// Destination pod information (column 11)
+				table.SetCell(i+1, 11, tview.NewTableCell(v.DstPod).
 					SetTextColor(tcell.ColorWhite).
 					SetExpansion(1))
 			}

@@ -40,11 +40,21 @@ import (
 )
 
 func main() {
-	parseFags()
+	parseFlags()
 
 	// Remove resource limits for kernels <5.11
 	if err := rlimit.RemoveMemlock(); err != nil {
 		log.Fatalf("Error removing memlock: %v", err)
+	}
+
+	// Initialize Kubernetes client if enabled
+	if *enableKube {
+		if err := initKubernetesClient(); err != nil {
+			log.Fatalf("Error initializing Kubernetes client: %v", err)
+		}
+
+		// Start cache cleanup goroutine
+		go cleanupIPToPodCache()
 	}
 
 	// Load the compiled eBPF ELF and load it into the kernel

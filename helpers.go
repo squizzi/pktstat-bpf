@@ -22,9 +22,12 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"net"
 	"net/netip"
 	"strings"
+	"time"
 )
 
 var protoNumbers = map[uint8]string{
@@ -87,6 +90,155 @@ var protoNumbers = map[uint8]string{
 	255: "Fragment",
 }
 
+// Map of well-known ports to service names
+var wellKnownPorts = map[uint16]string{
+	1:     "tcpmux",
+	5:     "rje",
+	7:     "echo",
+	9:     "discard",
+	11:    "systat",
+	13:    "daytime",
+	17:    "qotd",
+	18:    "msp",
+	19:    "chargen",
+	20:    "ftp-data",
+	21:    "ftp",
+	22:    "ssh",
+	23:    "telnet",
+	25:    "smtp",
+	37:    "time",
+	42:    "nameserver",
+	43:    "nicname",
+	49:    "tacacs",
+	53:    "domain",
+	67:    "bootps",
+	68:    "bootpc",
+	69:    "tftp",
+	70:    "gopher",
+	79:    "finger",
+	80:    "http",
+	81:    "hosts2-ns",
+	88:    "kerberos",
+	95:    "supdup",
+	101:   "hostname",
+	102:   "iso-tsap",
+	105:   "csnet-ns",
+	107:   "rtelnet",
+	109:   "pop2",
+	110:   "pop3",
+	111:   "sunrpc",
+	113:   "auth",
+	115:   "sftp",
+	117:   "uucp-path",
+	119:   "nntp",
+	123:   "ntp",
+	137:   "netbios-ns",
+	138:   "netbios-dgm",
+	139:   "netbios-ssn",
+	143:   "imap",
+	161:   "snmp",
+	162:   "snmptrap",
+	163:   "cmip-man",
+	164:   "cmip-agent",
+	174:   "mailq",
+	177:   "xdmcp",
+	178:   "nextstep",
+	179:   "bgp",
+	191:   "prospero",
+	194:   "irc",
+	199:   "smux",
+	201:   "at-rtmp",
+	202:   "at-nbp",
+	204:   "at-echo",
+	206:   "at-zis",
+	209:   "qmtp",
+	210:   "z39.50",
+	213:   "ipx",
+	220:   "imap3",
+	245:   "link",
+	347:   "fatserv",
+	363:   "rsvp_tunnel",
+	369:   "rpc2portmap",
+	370:   "codaauth2",
+	372:   "ulistproc",
+	389:   "ldap",
+	427:   "svrloc",
+	434:   "mobileip-agent",
+	435:   "mobilip-mn",
+	443:   "https",
+	444:   "snpp",
+	445:   "microsoft-ds",
+	464:   "kpasswd",
+	468:   "photuris",
+	487:   "saft",
+	488:   "gss-http",
+	496:   "pim-rp-disc",
+	500:   "isakmp",
+	538:   "gdomap",
+	546:   "dhcpv6-client",
+	547:   "dhcpv6-server",
+	554:   "rtsp",
+	563:   "nntps",
+	565:   "whoami",
+	587:   "submission",
+	610:   "npmp-local",
+	611:   "npmp-gui",
+	612:   "hmmp-ind",
+	631:   "ipp",
+	636:   "ldaps",
+	674:   "acap",
+	694:   "ha-cluster",
+	749:   "kerberos-adm",
+	750:   "kerberos4",
+	751:   "kerberos-master",
+	752:   "passwd-server",
+	754:   "krb-prop",
+	760:   "krbupdate",
+	765:   "webster",
+	767:   "phonebook",
+	808:   "omirr",
+	873:   "rsync",
+	901:   "swat",
+	989:   "ftps-data",
+	990:   "ftps",
+	992:   "telnets",
+	993:   "imaps",
+	994:   "ircs",
+	995:   "pop3s",
+	1080:  "socks",
+	1194:  "openvpn",
+	1433:  "ms-sql-s",
+	1434:  "ms-sql-m",
+	1521:  "oracle",
+	1723:  "pptp",
+	1755:  "wms",
+	1863:  "msnp",
+	3000:  "node-dev",
+	3128:  "squid",
+	3306:  "mysql",
+	3389:  "ms-wbt-server",
+	5060:  "sip",
+	5061:  "sips",
+	5222:  "xmpp-client",
+	5223:  "xmpp-client-ssl",
+	5269:  "xmpp-server",
+	5432:  "postgresql",
+	5984:  "couchdb",
+	6379:  "redis",
+	6667:  "irc",
+	8000:  "http-alt",
+	8008:  "http-alt",
+	8009:  "ajp13",
+	8080:  "http-proxy",
+	8443:  "https-alt",
+	8883:  "secure-mqtt",
+	9090:  "websm",
+	9200:  "elasticsearch",
+	9418:  "git",
+	27017: "mongodb",
+	33060: "mysqlx",
+}
+
 // protoToString converts a protocol number to its corresponding name.
 //
 // p: the protocol number to convert.
@@ -134,4 +286,88 @@ func findFirstEtherIface() string {
 	}
 
 	return defaultIface
+}
+
+// parseInternalNetworks parses a comma-separated list of CIDR strings
+// into a slice of netip.Prefix objects
+func parseInternalNetworks(cidrs string) ([]netip.Prefix, error) {
+	networks := []netip.Prefix{}
+
+	// If no networks specified, return empty list
+	if cidrs == "" {
+		return networks, nil
+	}
+
+	// Split by comma
+	cidrList := strings.Split(cidrs, ",")
+
+	// Parse each CIDR
+	for _, cidr := range cidrList {
+		cidr = strings.TrimSpace(cidr)
+		prefix, err := netip.ParsePrefix(cidr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid CIDR %q: %v", cidr, err)
+		}
+		networks = append(networks, prefix)
+	}
+
+	return networks, nil
+}
+
+// isInternalIP checks if the given IP is within any of the provided internal networks
+func isInternalIP(ip netip.Addr, networks []netip.Prefix) bool {
+	// If no networks defined, consider all IPs external
+	if len(networks) == 0 {
+		return false
+	}
+
+	// Check if IP is in any of the internal networks
+	for _, network := range networks {
+		if network.Contains(ip) {
+			return true
+		}
+	}
+
+	// IP is not in any internal network
+	return false
+}
+
+// lookupDomainName performs a reverse DNS lookup for the given IP with a timeout
+func lookupDomainName(ip netip.Addr) string {
+	// Skip reverse DNS for private/internal IPs as they typically don't have public DNS entries
+	if ip.IsPrivate() || ip.IsLoopback() {
+		return ""
+	}
+
+	// Create a context with a timeout for DNS lookup
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	// Convert netip.Addr to net.IP for compatibility with LookupAddr
+	netIP := net.IP(ip.AsSlice())
+
+	// Perform the reverse lookup
+	names, err := net.DefaultResolver.LookupAddr(ctx, netIP.String())
+	if err != nil || len(names) == 0 {
+		return ""
+	}
+
+	// Return the first name (removing trailing dot if present)
+	name := names[0]
+	if len(name) > 0 && name[len(name)-1] == '.' {
+		name = name[:len(name)-1]
+	}
+
+	return name
+}
+
+// portToServiceName converts a port number to its corresponding service name.
+//
+// port: the port number to convert.
+// string: the name of the service or empty string if not found.
+func portToServiceName(port uint16) string {
+	if v, ok := wellKnownPorts[port]; ok {
+		return v
+	}
+	return ""
 }

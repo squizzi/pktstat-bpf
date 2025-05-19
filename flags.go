@@ -40,14 +40,15 @@ const (
 )
 
 var (
-	ifname, xdpMode, useCGroup                               *string
-	jsonOutput, version, help, useXDP, useKProbes, enableTUI *bool
-	timeout, refresh                                         *time.Duration
-	xdpAttachFlags                                           link.XDPAttachFlags
+	ifname, xdpMode, useCGroup, kubeconfig                                                        *string
+	jsonOutput, version, help, useXDP, useKProbes, enableTUI, enableKube, externalOnly, enableDNS *bool
+	timeout, refresh                                                                              *time.Duration
+	xdpAttachFlags                                                                                link.XDPAttachFlags
+	internalNetworks                                                                              *string
 )
 
-func parseFags() {
-	fs := ff.NewFlagSet("pktstat-bpf")
+func parseFlags() {
+	fs := ff.NewFlagSet("pktstat-kube")
 
 	help = fs.Bool('?', "help", "display help")
 	jsonOutput = fs.Bool('j', "json", "if true, output in JSON format")
@@ -55,6 +56,11 @@ func parseFags() {
 	useXDP = fs.Bool('x', "xdp", "if true, use XDP instead of TC (this disables egress statistics)")
 	useKProbes = fs.Bool('k', "kprobes", "if true, use KProbes for per-proces TCP/UDP statistics")
 	enableTUI = fs.Bool('g', "tui", "if true, enable TUI")
+	enableKube = fs.BoolLong("kubernetes", "if true, enable Kubernetes pod lookups")
+	kubeconfig = fs.StringLong("kubeconfig", "", "path to kubeconfig (defaults to in-cluster config if empty)")
+	externalOnly = fs.BoolLong("external", "if true, only show traffic to external destinations")
+	internalNetworks = fs.StringLong("internal-networks", "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16", "comma-separated list of internal network CIDRs")
+	enableDNS = fs.BoolLong("enable-dns", "if true, perform reverse DNS lookups for destination IPs")
 
 	version = fs.BoolLong("version", "display program version")
 

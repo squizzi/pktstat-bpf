@@ -24,6 +24,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"net/netip"
 	"sort"
 	"strings"
 	"time"
@@ -55,11 +56,29 @@ func processMap(m *ebpf.Map, start time.Time, sortFunc func([]statEntry)) ([]sta
 	stats := make([]statEntry, 0, m.MaxEntries())
 	iter := m.Iterate()
 
+	// Parse internal networks if external-only filtering is enabled
+	var internalNetworkPrefixes []netip.Prefix
+	if externalOnly != nil && *externalOnly && internalNetworks != nil {
+		var err error
+		internalNetworkPrefixes, err = parseInternalNetworks(*internalNetworks)
+		if err != nil {
+			return nil, fmt.Errorf("error parsing internal networks: %w", err)
+		}
+	}
+
 	// build statEntry slice converting data where needed
 	for iter.Next(&key, &val) {
-		stats = append(stats, statEntry{
-			SrcIP:   bytesToAddr(key.Srcip.In6U.U6Addr8),
-			DstIP:   bytesToAddr(key.Dstip.In6U.U6Addr8),
+		srcIP := bytesToAddr(key.Srcip.In6U.U6Addr8)
+		dstIP := bytesToAddr(key.Dstip.In6U.U6Addr8)
+
+		// Skip if external-only is enabled and destination IP is internal
+		if externalOnly != nil && *externalOnly && isInternalIP(dstIP, internalNetworkPrefixes) {
+			continue
+		}
+
+		entry := statEntry{
+			SrcIP:   srcIP,
+			DstIP:   dstIP,
 			Proto:   protoToString(key.Proto),
 			SrcPort: key.SrcPort,
 			DstPort: key.DstPort,
@@ -68,7 +87,25 @@ func processMap(m *ebpf.Map, start time.Time, sortFunc func([]statEntry)) ([]sta
 			Bitrate: 8 * float64(val.Bytes) / dur,
 			Pid:     key.Pid,
 			Comm:    comm2String(key.Comm[:]),
-		})
+		}
+
+		// Set service name based on destination port
+		if key.Proto == 6 || key.Proto == 17 { // TCP or UDP
+			entry.Service = portToServiceName(key.DstPort)
+		}
+
+		// Look up domain name for destination IP
+		if enableDNS != nil && *enableDNS {
+			entry.DstDomain = lookupDomainName(dstIP)
+		}
+
+		// Look up pod names if Kubernetes support is enabled
+		if *enableKube && kubeClient != nil {
+			entry.SourcePod = lookupPodForIP(srcIP)
+			entry.DstPod = lookupPodForIP(dstIP)
+		}
+
+		stats = append(stats, entry)
 	}
 
 	sortFunc(stats)
@@ -194,6 +231,26 @@ func outputPlain(m []statEntry) string {
 			if v.Comm != "" {
 				sb.WriteString(fmt.Sprintf(", comm: %v", v.Comm))
 			}
+		}
+
+		if *enableKube {
+			if v.SourcePod != "" {
+				sb.WriteString(fmt.Sprintf(", src-pod: %v", v.SourcePod))
+			}
+
+			if v.DstPod != "" {
+				sb.WriteString(fmt.Sprintf(", dst-pod: %v", v.DstPod))
+			}
+		}
+
+		// Include domain name if available
+		if v.DstDomain != "" {
+			sb.WriteString(fmt.Sprintf(", dst-domain: %v", v.DstDomain))
+		}
+
+		// Include service name if available
+		if v.Service != "" {
+			sb.WriteString(fmt.Sprintf(", service: %v", v.Service))
 		}
 
 		sb.WriteString("\n")
