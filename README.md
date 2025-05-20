@@ -44,6 +44,7 @@ NAME
 FLAGS
   -?, --help                    display help
   -p, --plain                   if true, output in plain text format (default: JSON format)
+  -u, --unique                  if true, only show the first instance of each connection
   --kubeconfig STRING           path to kubeconfig file (Kubernetes lookups enabled if provided)
   --external                    if true, only show traffic to external destinations
   --internal-networks STRING    comma-separated list of internal network CIDRs to filter out when using --external
@@ -58,5 +59,7 @@ By default, output is in JSON format. With `--plain` the program will output in 
 With `--kubeconfig` the program will perform Kubernetes pod name lookups for IPs detected in the capture.
 
 With `--external` the program will only show traffic to external destinations (non-internal networks). The list of internal networks can be customized using the `--internal-networks` flag.
+
+With `--unique` the program will only show the first occurrence of each unique connection, ignoring timestamp differences. This is useful to filter out repetitive traffic and focus on the connection patterns.
 
 You can redirect the output to a file using standard shell redirection (e.g., `./pktstat-kube > output.json`).

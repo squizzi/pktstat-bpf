@@ -151,12 +151,36 @@ func main() {
 			// Filter out entries we've already seen
 			var newEntries []statEntry
 			for _, entry := range entries {
-				key := fmt.Sprintf("%s:%d->%s:%d:%s:%d:%s:%s",
+				// Create unique keys for tracking seen entries
+				// For regular tracking (with timestamp)
+				timeKey := fmt.Sprintf("%s:%d->%s:%d:%s:%d:%s:%s",
 					entry.SrcIP, entry.SrcPort, entry.DstIP, entry.DstPort,
 					entry.Proto, entry.Pid, entry.Comm, entry.Timestamp.Format(time.RFC3339Nano))
 
-				if !seenEntries[key] {
-					seenEntries[key] = true
+				// For --unique tracking (without timestamp)
+				uniqueKey := fmt.Sprintf("%s:%d->%s:%d:%s:%d:%s",
+					entry.SrcIP, entry.SrcPort, entry.DstIP, entry.DstPort,
+					entry.Proto, entry.Pid, entry.Comm)
+
+				// Determine if we should include this entry
+				shouldInclude := false
+
+				if uniqueOutput != nil && *uniqueOutput {
+					// When using --unique, filter by the connection pattern without timestamp
+					if !seenEntries[uniqueKey] {
+						seenEntries[uniqueKey] = true
+						seenEntries[timeKey] = true
+						shouldInclude = true
+					}
+				} else {
+					// Normal mode, filter only exact duplicates with timestamp
+					if !seenEntries[timeKey] {
+						seenEntries[timeKey] = true
+						shouldInclude = true
+					}
+				}
+
+				if shouldInclude {
 					newEntries = append(newEntries, entry)
 				}
 			}

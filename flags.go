@@ -30,9 +30,9 @@ import (
 )
 
 var (
-	kubeconfig                               *string
-	plainOutput, version, help, externalOnly *bool
-	internalNetworks                         *string
+	kubeconfig                                             *string
+	plainOutput, uniqueOutput, version, help, externalOnly *bool
+	internalNetworks                                       *string
 )
 
 func parseFlags() {
@@ -40,6 +40,7 @@ func parseFlags() {
 
 	help = fs.Bool('?', "help", "display help")
 	plainOutput = fs.Bool('p', "plain", "if true, output in plain text format")
+	uniqueOutput = fs.Bool('u', "unique", "if true, only show the first instance of each connection")
 	kubeconfig = fs.StringLong("kubeconfig", "", "path to kubeconfig file (Kubernetes lookups enabled if provided)")
 	externalOnly = fs.BoolLong("external", "if true, only show traffic to external destinations")
 	internalNetworks = fs.StringLong("internal-networks", "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16", "comma-separated list of internal network CIDRs to filter out when using --external")
