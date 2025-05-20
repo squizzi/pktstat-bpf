@@ -1200,7 +1200,7 @@ SEC("kprobe/ip_local_out")
 int BPF_KPROBE(ip_local_out_fn, struct sk_buff *skb, struct net *net) {
   if (!skb)
     return 0;
-  
+
   statkey key;
   __builtin_memset(&key, 0, sizeof(key));
 
@@ -1246,7 +1246,7 @@ SEC("kprobe/ip_output")
 int BPF_KPROBE(ip_output_fn, struct net *net, struct sock *sk, struct sk_buff *skb) {
   if (!skb)
     return 0;
-    
+
   statkey key;
   __builtin_memset(&key, 0, sizeof(key));
 
@@ -1271,6 +1271,164 @@ int BPF_KPROBE(ip_output_fn, struct net *net, struct sock *sk, struct sk_buff *s
   // Update with the basic information we have
   update_val(&key, len);
   return 0;
+}
+
+/**
+ * Structure to track DNS query information
+ */
+typedef struct dns_query_info {
+    char hostname[80];        // The hostname being queried
+    __u32 pid;                // Process ID making the request
+    char comm[TASK_COMM_LEN]; // Command name of the process
+} dns_query_info;
+
+/**
+ * Map to store DNS query information
+ */
+struct {
+  __uint(type, BPF_MAP_TYPE_LRU_HASH);
+  __uint(max_entries, MAX_ENTRIES);
+  __type(key, __u64);
+  __type(value, dns_query_info);
+} dns_queries SEC(".maps");
+
+/**
+ * Hook function for uprobe on getaddrinfo function.
+ *
+ * This function captures DNS hostname lookups made via getaddrinfo()
+ * and stores them in the dns_queries map.
+ *
+ * @param ctx BPF context containing function arguments
+ *
+ * @return 0
+ */
+SEC("uprobe/getaddrinfo")
+int getaddrinfo_entry(struct pt_regs *ctx) {
+    // Get first argument (hostname)
+    const char *node = NULL;
+    bpf_probe_read_user(&node, sizeof(node), (void *)PT_REGS_PARM1(ctx));
+
+    // Skip if node (hostname) is NULL
+    if (!node) {
+        return 0;
+    }
+
+    // Get process information
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u32 pid = pid_tgid & 0xFFFFFFFF;
+
+    // Create a struct to store the DNS query info
+    dns_query_info info = {};
+
+    // Copy the hostname to our struct (limit to 80 chars)
+    bpf_probe_read_user_str(info.hostname, sizeof(info.hostname), node);
+
+    // Skip empty or localhost queries
+    if (info.hostname[0] == '\0' ||
+        __builtin_memcmp(info.hostname, "localhost", 9) == 0) {
+        return 0;
+    }
+
+    // Get the command name
+    bpf_get_current_comm(&info.comm, sizeof(info.comm));
+    info.pid = pid;
+
+    // Store in our map
+    bpf_map_update_elem(&dns_queries, &pid, &info, BPF_ANY);
+
+    return 0;
+}
+
+/**
+ * Hook function for uprobe on gethostbyname function.
+ *
+ * This function captures DNS hostname lookups made via gethostbyname()
+ * and stores them in the dns_queries map.
+ *
+ * @param ctx BPF context containing function arguments
+ *
+ * @return 0
+ */
+SEC("uprobe/gethostbyname")
+int gethostbyname_entry(struct pt_regs *ctx) {
+    // Get first argument (hostname)
+    const char *name = NULL;
+    bpf_probe_read_user(&name, sizeof(name), (void *)PT_REGS_PARM1(ctx));
+
+    // Skip if name is NULL
+    if (!name) {
+        return 0;
+    }
+
+    // Get process information
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u32 pid = pid_tgid & 0xFFFFFFFF;
+
+    // Create a struct to store the DNS query info
+    dns_query_info info = {};
+
+    // Copy the hostname to our struct (limit to 80 chars)
+    bpf_probe_read_user_str(info.hostname, sizeof(info.hostname), name);
+
+    // Skip empty or localhost queries
+    if (info.hostname[0] == '\0' ||
+        __builtin_memcmp(info.hostname, "localhost", 9) == 0) {
+        return 0;
+    }
+
+    // Get the command name
+    bpf_get_current_comm(&info.comm, sizeof(info.comm));
+    info.pid = pid;
+
+    // Store in our map
+    bpf_map_update_elem(&dns_queries, &pid, &info, BPF_ANY);
+
+    return 0;
+}
+
+/**
+ * Hook function for uprobe on gethostbyname2 function.
+ * This is similar to gethostbyname but allows specifying the address family.
+ *
+ * @param ctx BPF context containing function arguments
+ *
+ * @return 0
+ */
+SEC("uprobe/gethostbyname2")
+int gethostbyname2_entry(struct pt_regs *ctx) {
+    // Get first argument (hostname)
+    const char *name = NULL;
+    bpf_probe_read_user(&name, sizeof(name), (void *)PT_REGS_PARM1(ctx));
+
+    // Skip if name is NULL
+    if (!name) {
+        return 0;
+    }
+
+    // Get process information
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u32 pid = pid_tgid & 0xFFFFFFFF;
+
+    // Create a struct to store the DNS query info
+    dns_query_info info = {};
+
+    // Copy the hostname to our struct (limit to 80 chars)
+    bpf_probe_read_user_str(info.hostname, sizeof(info.hostname), name);
+
+    // Skip empty or localhost queries
+    if (info.hostname[0] == '\0' ||
+        __builtin_memcmp(info.hostname, "localhost", 9) == 0) {
+        return 0;
+    }
+
+    // Get the command name
+    bpf_get_current_comm(&info.comm, sizeof(info.comm));
+    info.pid = pid;
+
+    // Store in our map
+    bpf_map_update_elem(&dns_queries, &pid, &info, BPF_ANY);
+
+    return 0;
 }
 
 char __license[] SEC("license") = "Dual MIT/GPL";

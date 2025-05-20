@@ -46,6 +46,32 @@ type statEntry struct {
 	DNSOriginPod  string `json:"dnsOriginPod,omitempty"`
 }
 
+// mergedDNSEntry represents a merged view of internal and external DNS queries
+type mergedDNSEntry struct {
+	// Original requestor (pod/client) information
+	OriginalSrcIP   string    `json:"originalSrcIp"`
+	OriginalSrcPort uint16    `json:"originalSrcPort"`
+	OriginalPod     string    `json:"originalPod,omitempty"`
+	OriginalComm    string    `json:"originalComm,omitempty"`
+	OriginalPid     int32     `json:"originalPid,omitempty"`
+	Timestamp       time.Time `json:"timestamp"`
+
+	// DNS server information
+	DNSServerIP   string `json:"dnsServerIp"`
+	DNSServerPod  string `json:"dnsServerPod,omitempty"`
+	DNSServerComm string `json:"dnsServerComm,omitempty"`
+	DNSServerPid  int32  `json:"dnsServerPid,omitempty"`
+
+	// External query information
+	ExternalDstIP   string `json:"externalDstIp,omitempty"`
+	ExternalDstPort uint16 `json:"externalDstPort,omitempty"`
+	Proto           string `json:"proto"`
+	LikelyService   string `json:"likelyService,omitempty"`
+
+	// DNS query information
+	QueryName string `json:"queryName,omitempty"` // The domain name being queried
+}
+
 type kprobeHook struct {
 	prog   *ebpf.Program
 	kprobe string

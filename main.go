@@ -48,6 +48,18 @@ var (
 	// Maps to track DNS requests and their origins
 	dnsRequestOrigins = make(map[string]*dnsOrigin) // key: "srcIP:srcPort-dstIP:dstPort", value: origin info
 	dnsRequestsMutex  = &sync.RWMutex{}
+
+	// Store merged DNS entries
+	mergedDNSEntries      = make(map[string]*mergedDNSEntry) // key: unique identifier, value: merged entry
+	mergedDNSEntriesMutex = &sync.RWMutex{}
+
+	// Track DNS lookups by process (Pid:Comm)
+	// key: "pid:comm", value: domain name
+	dnsLookups      = make(map[string]string)
+	dnsLookupsMutex = &sync.RWMutex{}
+
+	// Store the eBPF objects for use in other functions
+	globalObjs counterObjects
 )
 
 // dnsOrigin stores information about the original process that initiated a DNS request
@@ -58,6 +70,7 @@ type dnsOrigin struct {
 	Comm      string
 	Timestamp time.Time
 	PodName   string
+	QueryName string // The domain name being queried
 }
 
 func main() {
@@ -88,6 +101,9 @@ func main() {
 	}
 	defer func() { _ = objs.Close() }()
 
+	// Store in global variable for use in other functions
+	globalObjs = objs
+
 	var links []link.Link
 
 	defer func() {
@@ -110,6 +126,9 @@ func main() {
 	}
 
 	links = startKProbes(hooks, links)
+
+	// Add a separate function to monitor DNS hostname resolution
+	go monitorDNSResolution()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -147,6 +166,35 @@ func main() {
 
 			// Enrich with DNS origin information
 			enrichWithDNSOrigins(entries)
+
+			// Create merged DNS entries automatically when in Kubernetes environment with detected DNS services
+			var mergedOutput []mergedDNSEntry
+			if kubeconfig != nil && *kubeconfig != "" && kubeClient != nil && len(dnsServiceIPs) > 0 {
+				// We're in a Kubernetes environment with detected DNS services
+				// Automatically merge DNS queries
+				log.Printf("DNS services detected, will attempt to merge DNS queries")
+				mergedDNSEntries := analyzeDNSQueries(entries)
+
+				// Filter merged DNS entries for uniqueness if requested
+				if uniqueOutput != nil && *uniqueOutput {
+					seenMergedKeys := make(map[string]bool)
+					for _, entry := range mergedDNSEntries {
+						key := fmt.Sprintf("%s:%d->%s->%s:%d",
+							entry.OriginalSrcIP, entry.OriginalSrcPort,
+							entry.DNSServerIP,
+							entry.ExternalDstIP, entry.ExternalDstPort)
+
+						if !seenMergedKeys[key] {
+							seenMergedKeys[key] = true
+							mergedOutput = append(mergedOutput, entry)
+						}
+					}
+				} else {
+					mergedOutput = mergedDNSEntries
+				}
+			} else if kubeconfig != nil && *kubeconfig != "" && len(dnsServiceIPs) == 0 {
+				log.Printf("No DNS services detected, skipping DNS query merging")
+			}
 
 			// Filter out entries we've already seen
 			var newEntries []statEntry
@@ -186,16 +234,32 @@ func main() {
 			}
 
 			// Skip if no new entries
-			if len(newEntries) == 0 {
+			if len(newEntries) == 0 && len(mergedOutput) == 0 {
 				continue
 			}
 
 			// Format output
 			var output string
 			if plainOutput != nil && *plainOutput {
-				output = outputPlain(newEntries)
+				// Plain text output for normal entries
+				regularOutput := outputPlain(newEntries)
+
+				// Plain text output for merged DNS entries
+				mergedDNSOut := outputMergedDNSPlain(mergedOutput)
+				// Combine outputs without a separator
+				output = regularOutput + mergedDNSOut
 			} else {
-				output = outputJSON(newEntries)
+				// JSON Lines format - output both normal entries and merged DNS entries
+				regularOutput := outputJSONL(newEntries)
+				mergedDNSOut := outputMergedDNSJSONL(mergedOutput)
+
+				output = regularOutput
+				if mergedDNSOut != "" {
+					if output != "" {
+						output += "\n"
+					}
+					output += mergedDNSOut
+				}
 			}
 
 			// Add newline if needed
@@ -263,7 +327,7 @@ func startKProbes(hooks []kprobeHook, links []link.Link) []link.Link {
 
 // detectDNSServices tries to identify DNS services in the Kubernetes cluster
 func detectDNSServices() {
-	// If we have Kubernetes client initialized, we can try to detect DNS services
+	// If we have Kubernetes client initialized, try to detect DNS services
 	if kubeClient != nil {
 		ips, err := getDNSServiceIPs()
 		if err != nil {
@@ -274,8 +338,9 @@ func detectDNSServices() {
 		}
 	}
 
+	// If we couldn't detect DNS services via the API, just warn
 	if len(dnsServiceIPs) == 0 {
-		log.Printf("Warning: No DNS service IPs detected, will not track internal DNS queries")
+		log.Printf("Warning: No DNS service IPs detected via Kubernetes API, DNS tracking will be disabled")
 	}
 }
 
@@ -299,10 +364,12 @@ func getDNSServiceIPs() ([]string, error) {
 	// Look for services with port 53
 	for _, svc := range services.Items {
 		for _, port := range svc.Spec.Ports {
-			if port.Port == 53 && (port.Protocol == "UDP" || port.Protocol == "") {
+			// Accept both TCP and UDP DNS services, or services without explicit protocol
+			if port.Port == 53 && (port.Protocol == "UDP" || port.Protocol == "TCP" || port.Protocol == "") {
 				if svc.Spec.ClusterIP != "" && svc.Spec.ClusterIP != "None" {
 					ips = append(ips, svc.Spec.ClusterIP)
-					log.Printf("Found DNS service: %s/%s at %s, will track internal DNS queries", svc.Namespace, svc.Name, svc.Spec.ClusterIP)
+					log.Printf("Found DNS service: %s/%s at %s (protocol: %s), will track internal DNS queries",
+						svc.Namespace, svc.Name, svc.Spec.ClusterIP, port.Protocol)
 				}
 			}
 		}
@@ -326,11 +393,35 @@ func trackDNSQueries(entries []statEntry) {
 	dnsRequestsMutex.Lock()
 	defer dnsRequestsMutex.Unlock()
 
+	// Access the DNS lookup data (protected by its own mutex)
+	dnsLookupsMutex.RLock()
+	defer dnsLookupsMutex.RUnlock()
+
 	for _, entry := range entries {
-		// Check if this is a DNS query (UDP to port 53)
-		if entry.Proto == "UDP" && entry.DstPort == 53 {
-			// This is likely a DNS query, store the origin
+		// Check if this is a DNS query (TCP or UDP to port 53)
+		if (entry.Proto == "TCP" || entry.Proto == "UDP") && entry.DstPort == 53 {
+			// Generate the key for this DNS request
 			key := fmt.Sprintf("%s:%d-%s:%d", entry.SrcIP, entry.SrcPort, entry.DstIP, entry.DstPort)
+
+			// Try multiple approaches to find the hostname for this query
+			var hostname string
+
+			// Approach 1: Look for direct IP:port-IP:port mapping (from tcpdump-style capture)
+			if lookupKey := fmt.Sprintf("%s:%d-%s:53", entry.SrcIP, entry.SrcPort, entry.DstIP); dnsLookups[lookupKey] != "" {
+				hostname = dnsLookups[lookupKey]
+				log.Printf("Found hostname %s for DNS query %s (via direct mapping)", hostname, key)
+			}
+
+			// Approach 2: Look for PID:comm mapping (from uprobes)
+			if hostname == "" && entry.Pid != 0 {
+				pidCommKey := fmt.Sprintf("%d:%s", entry.Pid, entry.Comm)
+				if dnsLookups[pidCommKey] != "" {
+					hostname = dnsLookups[pidCommKey]
+					log.Printf("Found hostname %s for DNS query %s (via PID/comm mapping)", hostname, key)
+				}
+			}
+
+			// Store the DNS origin
 			dnsRequestOrigins[key] = &dnsOrigin{
 				SrcIP:     entry.SrcIP.String(),
 				SrcPort:   entry.SrcPort,
@@ -338,11 +429,17 @@ func trackDNSQueries(entries []statEntry) {
 				Comm:      entry.Comm,
 				Timestamp: entry.Timestamp,
 				PodName:   entry.SourcePod,
+				QueryName: hostname,
 			}
 
 			// Log for debugging
-			log.Printf("Tracking DNS request from %s:%d (PID: %d, Comm: %s, Pod: %s) to %s:%d",
-				entry.SrcIP, entry.SrcPort, entry.Pid, entry.Comm, entry.SourcePod, entry.DstIP, entry.DstPort)
+			if hostname != "" {
+				log.Printf("Tracking DNS request from %s:%d (PID: %d, Comm: %s, Pod: %s) to %s:%d for %s",
+					entry.SrcIP, entry.SrcPort, entry.Pid, entry.Comm, entry.SourcePod, entry.DstIP, entry.DstPort, hostname)
+			} else {
+				log.Printf("Tracking DNS request from %s:%d (PID: %d, Comm: %s, Pod: %s) to %s:%d",
+					entry.SrcIP, entry.SrcPort, entry.Pid, entry.Comm, entry.SourcePod, entry.DstIP, entry.DstPort)
+			}
 		}
 	}
 
@@ -376,16 +473,400 @@ func enrichWithDNSOrigins(entries []statEntry) {
 
 		// If this is a packet FROM a DNS server (response), try to correlate with origin
 		if srcIsDNS {
+			// Look for the most recent matching origin
+			var bestOrigin *dnsOrigin
+			var newestTimestamp time.Time
+
 			for _, origin := range dnsRequestOrigins {
-				// If we find a matching origin, enrich the entry
+				// Only consider recent entries (within the last 5 minutes)
 				if time.Since(origin.Timestamp) < 5*time.Minute {
-					// Update the entry with the original requester info
-					entries[i].DNSOriginPid = int32(origin.Pid)
-					entries[i].DNSOriginComm = origin.Comm
-					entries[i].DNSOriginPod = origin.PodName
-					break
+					// Choose the most recent origin as the best match
+					if bestOrigin == nil || origin.Timestamp.After(newestTimestamp) {
+						bestOrigin = origin
+						newestTimestamp = origin.Timestamp
+					}
 				}
+			}
+
+			// If we found a matching origin, enrich the entry
+			if bestOrigin != nil {
+				entries[i].DNSOriginPid = int32(bestOrigin.Pid)
+				entries[i].DNSOriginComm = bestOrigin.Comm
+				entries[i].DNSOriginPod = bestOrigin.PodName
+
+				log.Printf("Enriched entry from DNS server %s with origin information: pod=%s, comm=%s, pid=%d",
+					entries[i].SrcIP.String(), bestOrigin.PodName, bestOrigin.Comm, bestOrigin.Pid)
 			}
 		}
 	}
 }
+
+// analyzeDNSQueries looks for patterns of internal→DNS→external queries and merges related entries
+func analyzeDNSQueries(entries []statEntry) []mergedDNSEntry {
+	// First pass: identify DNS server queries (from internal pods to DNS service)
+	// and external DNS queries (from DNS service to external resolvers)
+	var internalQueries, externalQueries []statEntry
+
+	for _, entry := range entries {
+		dstIPStr := entry.DstIP.String()
+		srcIPStr := entry.SrcIP.String()
+
+		// Check if this query is to a DNS server (internal query)
+		isDNSServer := false
+		for _, dnsIP := range dnsServiceIPs {
+			if dstIPStr == dnsIP {
+				isDNSServer = true
+				break
+			}
+		}
+
+		// Check if this query is from a DNS server (external query)
+		isFromDNSServer := false
+		for _, dnsIP := range dnsServiceIPs {
+			if srcIPStr == dnsIP {
+				isFromDNSServer = true
+				break
+			}
+		}
+
+		// If the query is to a DNS server and the destination port is 53, it's an internal query
+		if isDNSServer && entry.DstPort == 53 {
+			log.Printf("Detected internal DNS query: %s:%d -> %s:%d (proto: %s, comm: %s, pod: %s)",
+				entry.SrcIP, entry.SrcPort, entry.DstIP, entry.DstPort,
+				entry.Proto, entry.Comm, entry.SourcePod)
+			internalQueries = append(internalQueries, entry)
+		} else if isFromDNSServer && entry.DstPort == 53 {
+			// If the query is from a DNS server to an external IP and the destination port is 53, it's an external query
+			log.Printf("Detected external DNS query: %s:%d -> %s:%d (proto: %s, comm: %s)",
+				entry.SrcIP, entry.SrcPort, entry.DstIP, entry.DstPort,
+				entry.Proto, entry.Comm)
+			externalQueries = append(externalQueries, entry)
+		}
+	}
+
+	// Now correlate internal and external queries
+	mergedDNSEntriesMutex.Lock()
+	defer mergedDNSEntriesMutex.Unlock()
+
+	// Process all internal queries first
+	for _, internalQuery := range internalQueries {
+		// Generate a key that will help us track this request
+		clientKey := fmt.Sprintf("%s:%d", internalQuery.SrcIP.String(), internalQuery.SrcPort)
+
+		// Look for DNS hostname information in our dnsRequestOrigins
+		var queryName string
+		dnsRequestsMutex.RLock()
+		for k, origin := range dnsRequestOrigins {
+			// Check if this origin matches our internal query
+			if strings.HasPrefix(k, fmt.Sprintf("%s:%d-", internalQuery.SrcIP.String(), internalQuery.SrcPort)) &&
+				origin.QueryName != "" {
+				queryName = origin.QueryName
+				log.Printf("Found hostname %s for internal DNS query from %s:%d",
+					queryName, internalQuery.SrcIP, internalQuery.SrcPort)
+				break
+			}
+		}
+		dnsRequestsMutex.RUnlock()
+
+		// Create a new merged entry
+		merged := &mergedDNSEntry{
+			// Original client info (the pod making the request)
+			OriginalSrcIP:   internalQuery.SrcIP.String(),
+			OriginalSrcPort: internalQuery.SrcPort,
+			OriginalPod:     internalQuery.SourcePod,
+			OriginalComm:    internalQuery.Comm,
+			OriginalPid:     internalQuery.Pid,
+			Timestamp:       internalQuery.Timestamp,
+
+			// DNS server info (this will be completed by the external query later)
+			DNSServerIP:  internalQuery.DstIP.String(),
+			DNSServerPod: internalQuery.DstPod,
+
+			// Protocol info
+			Proto:         internalQuery.Proto,
+			LikelyService: internalQuery.LikelyService,
+
+			// DNS query name if available
+			QueryName: queryName,
+		}
+
+		// If we can get DNS server info from destination pod information
+		// We can set it here, otherwise it will be set from external query
+		if strings.Contains(internalQuery.DstPod, "coredns") {
+			merged.DNSServerComm = "coredns"
+		} else if strings.Contains(internalQuery.DstPod, "kube-dns") {
+			merged.DNSServerComm = "kube-dns"
+		}
+
+		// Log with hostname if available
+		if queryName != "" {
+			log.Printf("Creating new merged DNS entry for: %s:%d (%s) -> DNS server: %s (%s) for hostname: %s",
+				merged.OriginalSrcIP, merged.OriginalSrcPort, merged.OriginalPod,
+				merged.DNSServerIP, merged.DNSServerPod, queryName)
+		} else {
+			log.Printf("Creating new merged DNS entry for: %s:%d (%s) -> DNS server: %s (%s)",
+				merged.OriginalSrcIP, merged.OriginalSrcPort, merged.OriginalPod,
+				merged.DNSServerIP, merged.DNSServerPod)
+		}
+
+		// Add to map of merged entries
+		mergedDNSEntries[clientKey] = merged
+	}
+
+	// Now process external queries and try to match them
+	for _, externalQuery := range externalQueries {
+		// We need to match this external query with the internal query that caused it
+		// Log the external query we're trying to match for debugging
+		log.Printf("Trying to match external DNS query: %s -> %s:%d (PID: %d, comm: %s)",
+			externalQuery.SrcIP, externalQuery.DstIP, externalQuery.DstPort,
+			externalQuery.Pid, externalQuery.Comm)
+
+		var bestMatch *mergedDNSEntry
+		var bestKey string
+		var bestScore int = -1 // Higher score = better match
+
+		// External query is from DNS server to external resolver
+		// Internal query is from pod to DNS server
+		// The DNS server is the connector between them
+
+		for key, merged := range mergedDNSEntries {
+			// Skip entries that already have external info
+			if merged.ExternalDstIP != "" {
+				continue
+			}
+
+			score := 0
+
+			// Check if the DNS server IP in the internal query matches the source IP of the external query
+			if merged.DNSServerIP == externalQuery.SrcIP.String() {
+				score += 5
+				log.Printf("  DNS server IP match: %s", merged.DNSServerIP)
+			}
+
+			// Check time proximity (higher score for closer time)
+			timeDiff := externalQuery.Timestamp.Sub(merged.Timestamp)
+			if timeDiff >= 0 && timeDiff < 100*time.Millisecond {
+				score += 4
+				log.Printf("  Very close time match: %v", timeDiff)
+			} else if timeDiff >= 0 && timeDiff < 500*time.Millisecond {
+				score += 3
+				log.Printf("  Close time match: %v", timeDiff)
+			} else if timeDiff >= 0 && timeDiff < 2*time.Second {
+				score += 2
+				log.Printf("  Recent time match: %v", timeDiff)
+			} else if timeDiff >= 0 && timeDiff < 5*time.Second {
+				score += 1
+				log.Printf("  Distant time match: %v", timeDiff)
+			} else {
+				continue // Too far apart in time, skip this entry
+			}
+
+			// Prefer matching DNS server's known name
+			if externalQuery.Comm == "coredns" || strings.Contains(externalQuery.SourcePod, "coredns") {
+				score += 3
+				log.Printf("  CoreDNS process identified")
+			} else if externalQuery.Comm == "kube-dns" || strings.Contains(externalQuery.SourcePod, "kube-dns") {
+				score += 3
+				log.Printf("  KubeDNS process identified")
+			}
+
+			// Protocols should match (TCP or UDP)
+			if merged.Proto == externalQuery.Proto {
+				score += 2
+				log.Printf("  Protocol match: %s", merged.Proto)
+			}
+
+			// If we have a better score, update the best match
+			if score > bestScore {
+				bestScore = score
+				bestMatch = merged
+				bestKey = key
+				log.Printf("  New best match with score %d", score)
+			}
+		}
+
+		// If we found a match, update the merged entry with external info
+		if bestMatch != nil && bestScore >= 3 { // Require a minimum score to consider a valid match
+			log.Printf("Matched DNS query: %s:%d (%s) -> %s -> %s:%d (score: %d)",
+				bestMatch.OriginalSrcIP, bestMatch.OriginalSrcPort, bestMatch.OriginalPod,
+				externalQuery.SrcIP, externalQuery.DstIP, externalQuery.DstPort, bestScore)
+
+			bestMatch.ExternalDstIP = externalQuery.DstIP.String()
+			bestMatch.ExternalDstPort = externalQuery.DstPort
+
+			// Take the DNS server comm/pid info from the external query
+			// This is important because the external query is made by the DNS server
+			bestMatch.DNSServerComm = externalQuery.Comm
+			bestMatch.DNSServerPid = externalQuery.Pid
+
+			// Update the entry in the map
+			mergedDNSEntries[bestKey] = bestMatch
+		} else {
+			log.Printf("Could not match external DNS query to %s:%d with any internal query (best score: %d)",
+				externalQuery.DstIP.String(), externalQuery.DstPort, bestScore)
+		}
+	}
+
+	// Convert map to slice for return
+	result := make([]mergedDNSEntry, 0, len(mergedDNSEntries))
+	for _, entry := range mergedDNSEntries {
+		// Only include entries that have both internal and external components
+		if entry.ExternalDstIP != "" {
+			result = append(result, *entry)
+		}
+	}
+
+	return result
+}
+
+// kernelStringToGo converts a null-terminated C string from kernel space to a Go string
+func kernelStringToGo(bytes []byte) string {
+	for i, b := range bytes {
+		if b == 0 {
+			return string(bytes[:i])
+		}
+	}
+	return string(bytes)
+}
+
+// DNSQueryInfo represents the format of entries in the dns_queries map
+type DNSQueryInfo struct {
+	Hostname [80]byte
+	Pid      uint32
+	Comm     [16]byte
+}
+
+// monitorDNSResolution uses eBPF uprobes to capture DNS resolution calls
+func monitorDNSResolution() {
+	log.Printf("Starting DNS resolution monitoring with eBPF uprobes")
+
+	// Libraries that may contain DNS resolution functions
+	libraries := []string{
+		"/lib/x86_64-linux-gnu/libc.so.6",     // Standard C library
+		"/lib64/libc.so.6",                    // Alternative path
+		"/usr/lib/x86_64-linux-gnu/libc.so.6", // Another alternative path
+		"/usr/lib64/libc.so.6",                // Another alternative path
+	}
+
+	var libPath string
+	for _, lib := range libraries {
+		if _, err := os.Stat(lib); err == nil {
+			libPath = lib
+			break
+		}
+	}
+
+	if libPath == "" {
+		log.Printf("Could not find libc library, DNS hostname resolution will not be available")
+		return
+	}
+
+	log.Printf("Using libc library at %s for DNS resolution tracking", libPath)
+
+	// Store our uprobe links
+	var dnsLinks []link.Link
+	defer func() {
+		for _, l := range dnsLinks {
+			_ = l.Close()
+		}
+	}()
+	// We can now directly access the programs from the global objects
+	// Define variables in the scope where they're needed
+
+	// Attempt to attach user-space probes if the required objects are available
+	// These objects will only be available if the eBPF code has been compiled
+	// with the new user space probes
+
+	// Check if programs are available
+	hasGetaddrinfo := globalObjs.GetaddrinfoEntry != nil
+	hasGethostbyname := globalObjs.GethostbynameEntry != nil
+	hasGethostbyname2 := globalObjs.Gethostbyname2Entry != nil
+
+	if !hasGetaddrinfo && !hasGethostbyname && !hasGethostbyname2 {
+		log.Printf("DNS resolution programs are not available in the compiled eBPF code")
+		log.Printf("Rebuild the project for full DNS resolution support")
+	} else {
+		log.Printf("DNS resolution programs found in the eBPF code")
+
+		// Open the library as an executable
+		ex, err := link.OpenExecutable(libPath)
+		if err != nil {
+			log.Printf("Failed to open library as executable: %v", err)
+		} else {
+			// Create attachments for all available programs
+			if hasGetaddrinfo {
+				l, err := ex.Uprobe("getaddrinfo", globalObjs.GetaddrinfoEntry, nil)
+				if err != nil {
+					log.Printf("Failed to attach uprobe for getaddrinfo: %v", err)
+				} else {
+					dnsLinks = append(dnsLinks, l)
+					log.Printf("Successfully attached uprobe for getaddrinfo")
+				}
+			}
+
+			if hasGethostbyname {
+				l, err := ex.Uprobe("gethostbyname", globalObjs.GethostbynameEntry, nil)
+				if err != nil {
+					log.Printf("Failed to attach uprobe for gethostbyname: %v", err)
+				} else {
+					dnsLinks = append(dnsLinks, l)
+					log.Printf("Successfully attached uprobe for gethostbyname")
+				}
+			}
+
+			if hasGethostbyname2 {
+				l, err := ex.Uprobe("gethostbyname2", globalObjs.Gethostbyname2Entry, nil)
+				if err != nil {
+					log.Printf("Failed to attach uprobe for gethostbyname2: %v", err)
+				} else {
+					dnsLinks = append(dnsLinks, l)
+					log.Printf("Successfully attached uprobe for gethostbyname2")
+				}
+			}
+		}
+	}
+
+	if len(dnsLinks) == 0 {
+		log.Printf("No DNS resolution probes could be attached")
+	}
+
+	// Create a ticker to periodically check for DNS resolutions
+	ticker := time.NewTicker(500 * time.Millisecond)
+	go func() {
+		defer ticker.Stop()
+		for range ticker.C {
+			if globalObjs.DnsQueries != nil {
+				// Use the helper function to read from the DNS queries map
+				readDNSQueriesMap(globalObjs.DnsQueries)
+			} else {
+				// Fall back to basic packet analysis
+				updateDNSLookups()
+			}
+		}
+	}()
+}
+
+// updateDNSLookups analyzes packet data to identify DNS queries
+func updateDNSLookups() {
+	// Without the dns_queries map, we'll try to derive DNS information from network packets
+	// This is a simplified approach that will be enhanced when the eBPF program is updated
+
+	dnsLookupsMutex.Lock()
+	defer dnsLookupsMutex.Unlock()
+
+	// Just logging that we're checking - actual implementation will be much more robust
+	// with the dns_queries map from the eBPF program
+	log.Printf("Analyzing packet data for DNS queries (limited capability until rebuild)")
+
+	// Clean up old entries (older than 5 minutes)
+	now := time.Now()
+	for key, ts := range dnsLookupTimestamps {
+		if now.Sub(ts) > 5*time.Minute {
+			delete(dnsLookups, key)
+			delete(dnsLookupTimestamps, key)
+		}
+	}
+}
+
+// Track when DNS lookups were added so we can clean them up
+var dnsLookupTimestamps = make(map[string]time.Time)
