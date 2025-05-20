@@ -92,18 +92,6 @@ func main() {
 	signalCh := make(chan os.Signal, 1)
 	signal.Notify(signalCh, os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
 
-	// Prepare output file if specified
-	var fileHandle *os.File
-	if outputFile != nil && *outputFile != "" {
-		var err error
-		fileHandle, err = os.OpenFile(*outputFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-		if err != nil {
-			log.Fatalf("Error opening output file: %v", err)
-		}
-		defer fileHandle.Close()
-		log.Printf("Writing output to %s", *outputFile)
-	}
-
 	// Create a ticker to process the map every second
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
@@ -160,15 +148,8 @@ func main() {
 				output += "\n"
 			}
 
-			// Write output to file or stdout
-			if fileHandle != nil && *outputFile != "" {
-				if _, err := fmt.Fprint(fileHandle, output); err != nil {
-					log.Printf("Error writing to output file: %v", err)
-				}
-				fileHandle.Sync()
-			} else {
-				fmt.Print(output)
-			}
+			// Write output to stdout
+			fmt.Print(output)
 
 		case <-ctx.Done():
 			return

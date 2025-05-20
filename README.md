@@ -48,7 +48,6 @@ FLAGS
   --external                    if true, only show traffic to external destinations
   --internal-networks STRING    comma-separated list of internal network CIDRs to filter out when using --external
                                 (default: 127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16)
-  --output-file STRING          path to file for writing output (if empty, output to stdout)
   --version                     display program version
 ```
 
@@ -60,4 +59,4 @@ With `--kubeconfig` the program will perform Kubernetes pod name lookups for IPs
 
 With `--external` the program will only show traffic to external destinations (non-internal networks). The list of internal networks can be customized using the `--internal-networks` flag.
 
-With `--output-file` the program will write output to the specified file instead of stdout.
+You can redirect the output to a file using standard shell redirection (e.g., `./pktstat-kube > output.json`).

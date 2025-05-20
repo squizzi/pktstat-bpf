@@ -25,19 +25,12 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/cilium/ebpf/link"
 	"github.com/peterbourgon/ff/v4"
 	"github.com/peterbourgon/ff/v4/ffhelp"
 )
 
-const (
-	defaultIface                          = "eth0"
-	defaultXDPMode                        = "auto"
-	XDPAttachModeNone link.XDPAttachFlags = 0
-)
-
 var (
-	kubeconfig, outputFile                   *string
+	kubeconfig                               *string
 	plainOutput, version, help, externalOnly *bool
 	internalNetworks                         *string
 )
@@ -50,8 +43,6 @@ func parseFlags() {
 	kubeconfig = fs.StringLong("kubeconfig", "", "path to kubeconfig file (Kubernetes lookups enabled if provided)")
 	externalOnly = fs.BoolLong("external", "if true, only show traffic to external destinations")
 	internalNetworks = fs.StringLong("internal-networks", "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16", "comma-separated list of internal network CIDRs to filter out when using --external")
-	outputFile = fs.StringLong("output-file", "", "path to file for writing JSON output (if empty, output to stdout)")
-
 	version = fs.BoolLong("version", "display program version")
 
 	var err error
@@ -73,12 +64,5 @@ func parseFlags() {
 		fmt.Printf("pktstat-bpf %v %v%v, built on: %v\n", GitTag, GitCommit, GitDirty, BuildTime)
 
 		os.Exit(0)
-	}
-
-	// Debug flag values
-	if outputFile != nil {
-		fmt.Printf("Output file path: %q\n", *outputFile)
-	} else {
-		fmt.Println("Output file path is nil")
 	}
 }
