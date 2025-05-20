@@ -7,7 +7,6 @@ toolchain go1.24.1
 require (
 	github.com/cilium/ebpf v0.18.0
 	github.com/goccy/go-json v0.10.5
-	github.com/hako/durafmt v0.0.0-20210608085754-5c1018a4e16b
 	github.com/peterbourgon/ff/v4 v4.0.0-alpha.4
 	k8s.io/apimachinery v0.33.1
 	k8s.io/client-go v0.33.1

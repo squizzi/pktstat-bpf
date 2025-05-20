@@ -28,7 +28,9 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/features"
@@ -84,42 +86,93 @@ func main() {
 
 	links = startKProbes(hooks, links)
 
-	c1, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	signalCh := make(chan os.Signal, 1)
 	signal.Notify(signalCh, os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
 
-	log.Println("Capturing packets... Press Ctrl+C to stop")
+	// Prepare output file if specified
+	var fileHandle *os.File
+	if outputFile != nil && *outputFile != "" {
+		var err error
+		fileHandle, err = os.OpenFile(*outputFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err != nil {
+			log.Fatalf("Error opening output file: %v", err)
+		}
+		defer fileHandle.Close()
+		log.Printf("Writing output to %s", *outputFile)
+	}
 
+	// Create a ticker to process the map every second
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	// Set up signal handler
 	go func() {
 		s := <-signalCh
-		_, _ = fmt.Fprintf(os.Stderr, "Received %v signal, trying to exit...\n", s)
+		_, _ = fmt.Fprintf(os.Stderr, "Received %v signal, exiting...\n", s)
 		cancel()
 	}()
 
-	<-c1.Done()
+	// Track seen entries to avoid duplicates
+	seenEntries := make(map[string]bool)
 
-	m, err := processMap(objs.PktCount, timeDateSort)
-	if err != nil {
-		log.Fatalf("Error reading eBPF map: %v", err)
-	}
+	// Run the main loop
+	for {
+		select {
+		case <-ticker.C:
+			// Process the map
+			entries, err := processMap(objs.PktCount, timeDateSort)
+			if err != nil {
+				log.Printf("Error reading eBPF map: %v", err)
+				continue
+			}
 
-	var output string
-	if plainOutput != nil && *plainOutput {
-		output = outputPlain(m)
-	} else {
-		output = outputJSON(m)
-	}
+			// Filter out entries we've already seen
+			var newEntries []statEntry
+			for _, entry := range entries {
+				key := fmt.Sprintf("%s:%d->%s:%d:%s:%d:%s:%s",
+					entry.SrcIP, entry.SrcPort, entry.DstIP, entry.DstPort,
+					entry.Proto, entry.Pid, entry.Comm, entry.Timestamp.Format(time.RFC3339Nano))
 
-	if outputFile != nil && *outputFile != "" {
-		err := os.WriteFile(*outputFile, []byte(output), 0o644)
-		if err != nil {
-			log.Fatalf("Error writing to output file: %v", err)
+				if !seenEntries[key] {
+					seenEntries[key] = true
+					newEntries = append(newEntries, entry)
+				}
+			}
+
+			// Skip if no new entries
+			if len(newEntries) == 0 {
+				continue
+			}
+
+			// Format output
+			var output string
+			if plainOutput != nil && *plainOutput {
+				output = outputPlain(newEntries)
+			} else {
+				output = outputJSON(newEntries)
+			}
+
+			// Add newline if needed
+			if output != "" && !strings.HasSuffix(output, "\n") {
+				output += "\n"
+			}
+
+			// Write output to file or stdout
+			if fileHandle != nil && *outputFile != "" {
+				if _, err := fmt.Fprint(fileHandle, output); err != nil {
+					log.Printf("Error writing to output file: %v", err)
+				}
+				fileHandle.Sync()
+			} else {
+				fmt.Print(output)
+			}
+
+		case <-ctx.Done():
+			return
 		}
-		log.Printf("Output written to %s", *outputFile)
-	} else {
-		fmt.Println(output)
 	}
 }
 

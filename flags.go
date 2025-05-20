@@ -37,10 +37,9 @@ const (
 )
 
 var (
-	ifname, xdpMode, useCGroup, kubeconfig, outputFile           *string
-	plainOutput, version, help, useXDP, useKProbes, externalOnly *bool
-	xdpAttachFlags                                               link.XDPAttachFlags
-	internalNetworks                                             *string
+	kubeconfig, outputFile                   *string
+	plainOutput, version, help, externalOnly *bool
+	internalNetworks                         *string
 )
 
 func parseFlags() {
@@ -76,22 +75,10 @@ func parseFlags() {
 		os.Exit(0)
 	}
 
-	switch *xdpMode {
-	case "", "auto", "best":
-		// kernel will select the best mode starting with Native and fallback to Generic
-		xdpAttachFlags = XDPAttachModeNone
-	case "generic":
-		// SKB generic XDP mode
-		xdpAttachFlags = link.XDPGenericMode
-	case "native", "driver":
-		// XDP support from NIC driver required
-		xdpAttachFlags = link.XDPDriverMode
-	case "offload", "hardware":
-		// only for NICs with HW XDP support
-		xdpAttachFlags = link.XDPOffloadMode
-	default:
-		fmt.Printf("Error invalid XDP mode: %v, pick from: auto, generic, native or offload\n", *xdpMode)
-
-		os.Exit(1)
+	// Debug flag values
+	if outputFile != nil {
+		fmt.Printf("Output file path: %q\n", *outputFile)
+	} else {
+		fmt.Println("Output file path is nil")
 	}
 }
