@@ -1183,4 +1183,94 @@ int BPF_KPROBE(rawv6_sendmsg, struct sock *sk, struct msghdr *msg, size_t len) {
 }
 #endif
 
+/**
+ * Hook function for kprobe on ip_local_out function.
+ *
+ * Intercepts packets at the start of local packet transmission
+ * in the networking stack.
+ *
+ * @param skb pointer to the socket buffer
+ * @param net pointer to the network namespace
+ *
+ * @return 0
+ *
+ * @throws none
+ */
+SEC("kprobe/ip_local_out")
+int BPF_KPROBE(ip_local_out_fn, struct sk_buff *skb, struct net *net) {
+  if (!skb)
+    return 0;
+  
+  statkey key;
+  __builtin_memset(&key, 0, sizeof(key));
+
+  // Record process information
+  pid_t pid = bpf_get_current_pid_tgid() & 0xFFFFFFFF;
+  if (pid > 0) {
+    bpf_get_current_comm(&key.comm, sizeof(key.comm));
+    key.pid = pid;
+  }
+
+  // Get packet size
+  __u64 len = BPF_CORE_READ(skb, len);
+
+  // Try to extract socket information if available
+  struct sock *sk = BPF_CORE_READ(skb, sk);
+  if (sk) {
+    // Let's use the safer process_tcp function which already works in existing kprobes
+    process_tcp(sk, &key, pid);
+    update_val(&key, len);
+    return 0;
+  }
+
+  // Update with the basic information we have
+  update_val(&key, len);
+  return 0;
+}
+
+/**
+ * Hook function for kprobe on ip_output function.
+ *
+ * Intercepts packets at the output stage of the IP stack,
+ * which comes after ip_local_out.
+ *
+ * @param net pointer to the network namespace
+ * @param sk pointer to the socket structure
+ * @param skb pointer to the socket buffer
+ *
+ * @return 0
+ *
+ * @throws none
+ */
+SEC("kprobe/ip_output")
+int BPF_KPROBE(ip_output_fn, struct net *net, struct sock *sk, struct sk_buff *skb) {
+  if (!skb)
+    return 0;
+    
+  statkey key;
+  __builtin_memset(&key, 0, sizeof(key));
+
+  // Record process information
+  pid_t pid = bpf_get_current_pid_tgid() & 0xFFFFFFFF;
+  if (pid > 0) {
+    bpf_get_current_comm(&key.comm, sizeof(key.comm));
+    key.pid = pid;
+  }
+
+  // Get packet size
+  __u64 len = BPF_CORE_READ(skb, len);
+
+  // If we have a valid socket, use the established safe method
+  if (sk) {
+    // Use the existing process_tcp function which already works in other kprobes
+    process_tcp(sk, &key, pid);
+    update_val(&key, len);
+    return 0;
+  }
+
+  // Update with the basic information we have
+  update_val(&key, len);
+  return 0;
+}
+
 char __license[] SEC("license") = "Dual MIT/GPL";

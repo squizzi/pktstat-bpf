@@ -86,6 +86,8 @@ func main() {
 			{kprobe: "tcp_sendmsg", prog: objs.TcpSendmsg},
 			{kprobe: "tcp_cleanup_rbuf", prog: objs.TcpCleanupRbuf},
 			{kprobe: "ip_send_skb", prog: objs.IpSendSkb},
+			{kprobe: "ip_local_out", prog: objs.IpLocalOutFn},
+			{kprobe: "ip_output", prog: objs.IpOutputFn},
 			{kprobe: "skb_consume_udp", prog: objs.SkbConsumeUdp},
 			{kprobe: "__icmp_send", prog: objs.IcmpSend},
 			{kprobe: "icmp6_send", prog: objs.Icmp6Send},
