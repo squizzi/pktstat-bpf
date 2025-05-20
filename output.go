@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"net/netip"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -145,6 +146,52 @@ func outputJSON(m []statEntry) string {
 	out, _ := json.Marshal(m)
 
 	return string(out)
+}
+
+// outputPlain formats a slice of statEntry objects into a plain text string.
+// Each line represents a network flow with the following information:
+//   - Timestamp
+//   - Protocol (TCP, UDP, ICMPv4, IPv6-ICMP)
+//   - Source IP and port
+//   - Destination IP and port
+//   - ICMP type and code (for ICMP protocols)
+//   - Process ID (PID)
+//   - Command name (comm)
+//
+// The output is sorted chronologically by timestamp.
+//
+// Parameters:
+//
+//	m []statEntry - the statEntry slice to be formatted
+//
+// Returns:
+//
+//	string - the formatted string
+func outputPlain(m []statEntry) string {
+	var sb strings.Builder
+
+	for _, v := range m {
+		switch v.Proto {
+		case "ICMPv4", "IPv6-ICMP":
+			sb.WriteString(fmt.Sprintf("timestamp: %v, proto: %v, src: %v, dst: %v, type: %d, code: %d",
+				v.Timestamp, v.Proto, v.SrcIP, v.DstIP, v.SrcPort, v.DstPort))
+		default:
+			sb.WriteString(fmt.Sprintf("timestamp: %v, proto: %v, src: %v:%d, dst: %v:%d",
+				v.Timestamp, v.Proto, v.SrcIP, v.SrcPort, v.DstIP, v.DstPort))
+		}
+
+		if v.Pid > 0 {
+			sb.WriteString(fmt.Sprintf(", pid: %d", v.Pid))
+		}
+
+		if v.Comm != "" {
+			sb.WriteString(fmt.Sprintf(", comm: %v", v.Comm))
+		}
+
+		sb.WriteString("\n")
+	}
+
+	return sb.String()
 }
 
 // comm2String converts a byte slice to a string, trimming any null bytes.

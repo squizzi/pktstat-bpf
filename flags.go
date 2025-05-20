@@ -24,7 +24,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"time"
 
 	"github.com/cilium/ebpf/link"
 	"github.com/peterbourgon/ff/v4"
@@ -33,37 +32,28 @@ import (
 
 const (
 	defaultIface                          = "eth0"
-	defaultTimeout                        = 10 * time.Minute
 	defaultXDPMode                        = "auto"
 	XDPAttachModeNone link.XDPAttachFlags = 0
 )
 
 var (
-	ifname, xdpMode, useCGroup, kubeconfig                      *string
-	jsonOutput, version, help, useXDP, useKProbes, externalOnly *bool
-	timeout                                                     *time.Duration
-	xdpAttachFlags                                              link.XDPAttachFlags
-	internalNetworks                                            *string
+	ifname, xdpMode, useCGroup, kubeconfig, outputFile           *string
+	plainOutput, version, help, useXDP, useKProbes, externalOnly *bool
+	xdpAttachFlags                                               link.XDPAttachFlags
+	internalNetworks                                             *string
 )
 
 func parseFlags() {
 	fs := ff.NewFlagSet("pktstat-kube")
 
 	help = fs.Bool('?', "help", "display help")
-	jsonOutput = fs.Bool('j', "json", "if true, output in JSON format")
-	useCGroup = fs.String('c', "cgroup", "", "the path to a CGroup V2 to measure statistics on")
-	useXDP = fs.Bool('x', "xdp", "if true, use XDP instead of TC (this disables egress statistics)")
-	useKProbes = fs.Bool('k', "kprobes", "if true, use KProbes for per-proces TCP/UDP statistics")
+	plainOutput = fs.Bool('p', "plain", "if true, output in plain text format")
 	kubeconfig = fs.StringLong("kubeconfig", "", "path to kubeconfig file (Kubernetes lookups enabled if provided)")
 	externalOnly = fs.BoolLong("external", "if true, only show traffic to external destinations")
-	internalNetworks = fs.StringLong("internal-networks", "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16", "comma-separated list of internal network CIDRs")
+	internalNetworks = fs.StringLong("internal-networks", "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16", "comma-separated list of internal network CIDRs to filter out when using --external")
+	outputFile = fs.StringLong("output-file", "", "path to file for writing JSON output (if empty, output to stdout)")
 
 	version = fs.BoolLong("version", "display program version")
-
-	ifname = fs.String('i', "iface", findFirstEtherIface(), "interface to read from")
-	xdpMode = fs.StringLong("xdp_mode", defaultXDPMode, "XDP attach mode (auto, generic, native or offload; native and offload require NIC driver support)")
-
-	timeout = fs.Duration('t', "timeout", defaultTimeout, "timeout for packet capture in CLI")
 
 	var err error
 
