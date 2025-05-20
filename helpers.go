@@ -321,6 +321,11 @@ func isInternalIP(ip netip.Addr, networks []netip.Prefix) bool {
 		return false
 	}
 
+	// Filter out unspecified addresses (0.0.0.0 and ::)
+	if ip.IsUnspecified() {
+		return true
+	}
+
 	// Check if IP is in any of the internal networks
 	for _, network := range networks {
 		if network.Contains(ip) {
