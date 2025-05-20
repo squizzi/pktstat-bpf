@@ -110,7 +110,7 @@ var wellKnownPorts = map[uint16]string{
 	42:    "nameserver",
 	43:    "nicname",
 	49:    "tacacs",
-	53:    "domain",
+	53:    "dns",
 	67:    "bootps",
 	68:    "bootpc",
 	69:    "tftp",
