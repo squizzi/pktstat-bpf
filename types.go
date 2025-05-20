@@ -23,25 +23,23 @@ package main
 
 import (
 	"net/netip"
+	"time"
 
 	"github.com/cilium/ebpf"
 )
 
 type statEntry struct {
-	SrcIP     netip.Addr `json:"srcIp"`
-	DstIP     netip.Addr `json:"dstIp"`
-	Proto     string     `json:"proto"`
-	Comm      string     `json:"comm,omitempty"`
-	Bytes     uint64     `json:"bytes"`
-	Packets   uint64     `json:"packets"`
-	Bitrate   float64    `json:"bitrate"`
-	Pid       int32      `json:"pid,omitempty"`
-	SrcPort   uint16     `json:"srcPort"`
-	DstPort   uint16     `json:"dstPort"`
-	Service   string     `json:"service,omitempty"`
-	SourcePod string     `json:"sourcePod,omitempty"`
-	DstPod    string     `json:"dstPod,omitempty"`
-	DstDomain string     `json:"dstDomain,omitempty"`
+	SrcIP         netip.Addr `json:"srcIp"`
+	DstIP         netip.Addr `json:"dstIp"`
+	Proto         string     `json:"proto"`
+	Comm          string     `json:"comm,omitempty"`
+	Pid           int32      `json:"pid,omitempty"`
+	SrcPort       uint16     `json:"srcPort"`
+	DstPort       uint16     `json:"dstPort"`
+	LikelyService string     `json:"likelyService,omitempty"`
+	SourcePod     string     `json:"sourcePod,omitempty"`
+	DstPod        string     `json:"dstPod,omitempty"`
+	Timestamp     time.Time  `json:"timestamp"`
 }
 
 type kprobeHook struct {

@@ -22,12 +22,10 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"net"
 	"net/netip"
 	"strings"
-	"time"
 )
 
 var protoNumbers = map[uint8]string{
@@ -337,40 +335,11 @@ func isInternalIP(ip netip.Addr, networks []netip.Prefix) bool {
 	return false
 }
 
-// lookupDomainName performs a reverse DNS lookup for the given IP with a timeout
-func lookupDomainName(ip netip.Addr) string {
-	// Skip reverse DNS for private/internal IPs as they typically don't have public DNS entries
-	if ip.IsPrivate() || ip.IsLoopback() {
-		return ""
-	}
-
-	// Create a context with a timeout for DNS lookup
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-
-	// Convert netip.Addr to net.IP for compatibility with LookupAddr
-	netIP := net.IP(ip.AsSlice())
-
-	// Perform the reverse lookup
-	names, err := net.DefaultResolver.LookupAddr(ctx, netIP.String())
-	if err != nil || len(names) == 0 {
-		return ""
-	}
-
-	// Return the first name (removing trailing dot if present)
-	name := names[0]
-	if len(name) > 0 && name[len(name)-1] == '.' {
-		name = name[:len(name)-1]
-	}
-
-	return name
-}
-
-// portToServiceName converts a port number to its corresponding service name.
+// portToLikelyServiceName converts a port number to its corresponding service name.
 //
 // port: the port number to convert.
 // string: the name of the service or empty string if not found.
-func portToServiceName(port uint16) string {
+func portToLikelyServiceName(port uint16) string {
 	if v, ok := wellKnownPorts[port]; ok {
 		return v
 	}

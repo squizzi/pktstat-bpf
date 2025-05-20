@@ -34,17 +34,16 @@ import (
 const (
 	defaultIface                          = "eth0"
 	defaultTimeout                        = 10 * time.Minute
-	defaultRefresh                        = 1 * time.Second
 	defaultXDPMode                        = "auto"
 	XDPAttachModeNone link.XDPAttachFlags = 0
 )
 
 var (
-	ifname, xdpMode, useCGroup, kubeconfig                                                        *string
-	jsonOutput, version, help, useXDP, useKProbes, enableTUI, enableKube, externalOnly, enableDNS *bool
-	timeout, refresh                                                                              *time.Duration
-	xdpAttachFlags                                                                                link.XDPAttachFlags
-	internalNetworks                                                                              *string
+	ifname, xdpMode, useCGroup, kubeconfig                      *string
+	jsonOutput, version, help, useXDP, useKProbes, externalOnly *bool
+	timeout                                                     *time.Duration
+	xdpAttachFlags                                              link.XDPAttachFlags
+	internalNetworks                                            *string
 )
 
 func parseFlags() {
@@ -55,19 +54,15 @@ func parseFlags() {
 	useCGroup = fs.String('c', "cgroup", "", "the path to a CGroup V2 to measure statistics on")
 	useXDP = fs.Bool('x', "xdp", "if true, use XDP instead of TC (this disables egress statistics)")
 	useKProbes = fs.Bool('k', "kprobes", "if true, use KProbes for per-proces TCP/UDP statistics")
-	enableTUI = fs.Bool('g', "tui", "if true, enable TUI")
-	enableKube = fs.BoolLong("kubernetes", "if true, enable Kubernetes pod lookups")
-	kubeconfig = fs.StringLong("kubeconfig", "", "path to kubeconfig (defaults to in-cluster config if empty)")
+	kubeconfig = fs.StringLong("kubeconfig", "", "path to kubeconfig file (Kubernetes lookups enabled if provided)")
 	externalOnly = fs.BoolLong("external", "if true, only show traffic to external destinations")
 	internalNetworks = fs.StringLong("internal-networks", "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16", "comma-separated list of internal network CIDRs")
-	enableDNS = fs.BoolLong("enable-dns", "if true, perform reverse DNS lookups for destination IPs")
 
 	version = fs.BoolLong("version", "display program version")
 
 	ifname = fs.String('i', "iface", findFirstEtherIface(), "interface to read from")
 	xdpMode = fs.StringLong("xdp_mode", defaultXDPMode, "XDP attach mode (auto, generic, native or offload; native and offload require NIC driver support)")
 
-	refresh = fs.Duration('r', "refresh", defaultRefresh, "refresh interval in TUI")
 	timeout = fs.Duration('t', "timeout", defaultTimeout, "timeout for packet capture in CLI")
 
 	var err error
@@ -108,9 +103,5 @@ func parseFlags() {
 		fmt.Printf("Error invalid XDP mode: %v, pick from: auto, generic, native or offload\n", *xdpMode)
 
 		os.Exit(1)
-	}
-
-	if *enableTUI {
-		*timeout = 0
 	}
 }

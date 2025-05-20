@@ -47,8 +47,8 @@ func main() {
 		log.Fatalf("Error removing memlock: %v", err)
 	}
 
-	// Initialize Kubernetes client if enabled
-	if *enableKube {
+	// Initialize Kubernetes client if kubeconfig is provided
+	if kubeconfig != nil && *kubeconfig != "" {
 		if err := initKubernetesClient(); err != nil {
 			log.Fatalf("Error initializing Kubernetes client: %v", err)
 		}
@@ -107,42 +107,32 @@ func main() {
 	c1, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	startTime := time.Now()
+	signalCh := make(chan os.Signal, 1)
+	signal.Notify(signalCh, os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
 
-	if *enableTUI {
-		drawTUI(objs, startTime)
-	} else {
-		signalCh := make(chan os.Signal, 1)
-		signal.Notify(signalCh, os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		s := <-signalCh
+		_, _ = fmt.Fprintf(os.Stderr, "Received %v signal, trying to exit...\n", s)
+		cancel()
+	}()
+
+	if *timeout > 0 {
+		log.Printf("Listening for %v before exiting", durafmt.Parse(*timeout))
 
 		go func() {
-			s := <-signalCh
-			_, _ = fmt.Fprintf(os.Stderr, "Received %v signal, trying to exit...\n", s)
+			time.Sleep(*timeout)
 			cancel()
 		}()
-
-		if *timeout > 0 {
-			log.Printf("Listening for %v before exiting", durafmt.Parse(*timeout))
-
-			go func() {
-				time.Sleep(*timeout)
-				cancel()
-			}()
-		}
-
-		<-c1.Done()
-
-		m, err := processMap(objs.PktCount, startTime, bitrateSort)
-		if err != nil {
-			log.Fatalf("Error reading eBPF map: %v", err)
-		}
-
-		if *jsonOutput {
-			fmt.Println(outputJSON(m))
-		} else {
-			fmt.Printf(outputPlain(m))
-		}
 	}
+
+	<-c1.Done()
+
+	m, err := processMap(objs.PktCount, timeDateSort)
+	if err != nil {
+		log.Fatalf("Error reading eBPF map: %v", err)
+	}
+
+	fmt.Println(outputJSON(m))
 }
 
 // startKProbes attaches a series of eBPF programs to kernel functions using KProbes.

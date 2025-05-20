@@ -56,25 +56,18 @@ type ipPodCacheEntry struct {
 
 // initKubernetesClient initializes the Kubernetes client if enabled
 func initKubernetesClient() error {
-	if !*enableKube {
+	// Don't initialize if kubeconfig is empty
+	if kubeconfig == nil || *kubeconfig == "" {
 		return nil
 	}
 
 	var config *rest.Config
 	var err error
 
-	if *kubeconfig == "" {
-		// In-cluster configuration
-		config, err = rest.InClusterConfig()
-		if err != nil {
-			return err
-		}
-	} else {
-		// Out-of-cluster configuration
-		config, err = clientcmd.BuildConfigFromFlags("", *kubeconfig)
-		if err != nil {
-			return err
-		}
+	// Out-of-cluster configuration
+	config, err = clientcmd.BuildConfigFromFlags("", *kubeconfig)
+	if err != nil {
+		return err
 	}
 
 	// Create Kubernetes client
@@ -83,14 +76,15 @@ func initKubernetesClient() error {
 		return err
 	}
 
-	log.Printf("Kubernetes client initialized, pod lookups enabled")
+	log.Printf("Kubernetes client initialized with kubeconfig: %s", *kubeconfig)
 	return nil
 }
 
 // lookupPodForIP looks up the pod name for a given IP address
 // It caches results to avoid excessive API calls
 func lookupPodForIP(ip netip.Addr) string {
-	if !*enableKube || kubeClient == nil {
+	// Skip lookup if kubeconfig is empty or client not initialized
+	if kubeconfig == nil || *kubeconfig == "" || kubeClient == nil {
 		return ""
 	}
 
@@ -135,7 +129,8 @@ func cleanupIPToPodCache() {
 	for {
 		time.Sleep(cacheExpiry)
 
-		if !*enableKube || kubeClient == nil {
+		// Skip cleanup if kubeconfig is empty or client not initialized
+		if kubeconfig == nil || *kubeconfig == "" || kubeClient == nil {
 			continue
 		}
 
