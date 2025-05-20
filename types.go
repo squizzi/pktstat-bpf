@@ -40,6 +40,10 @@ type statEntry struct {
 	SourcePod     string     `json:"sourcePod,omitempty"`
 	DstPod        string     `json:"dstPod,omitempty"`
 	Timestamp     time.Time  `json:"timestamp"`
+	// DNS origin tracking fields
+	DNSOriginPid  int32  `json:"dnsOriginPid,omitempty"`
+	DNSOriginComm string `json:"dnsOriginComm,omitempty"`
+	DNSOriginPod  string `json:"dnsOriginPod,omitempty"`
 }
 
 type kprobeHook struct {

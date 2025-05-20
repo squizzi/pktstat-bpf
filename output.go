@@ -62,8 +62,21 @@ func processMap(m *ebpf.Map, sortFunc func([]statEntry)) ([]statEntry, error) {
 		srcIP := bytesToAddr(key.Srcip.In6U.U6Addr8)
 		dstIP := bytesToAddr(key.Dstip.In6U.U6Addr8)
 
+		// Check if this IP is a DNS service
+		isDNSTraffic := false
+		dstIPStr := dstIP.String()
+		srcIPStr := srcIP.String()
+
+		for _, dnsIP := range dnsServiceIPs {
+			if dstIPStr == dnsIP || srcIPStr == dnsIP {
+				isDNSTraffic = true
+				break
+			}
+		}
+
 		// Skip if external-only is enabled and destination IP is internal
-		if externalOnly != nil && *externalOnly && isInternalIP(dstIP, internalNetworkPrefixes) {
+		// But always include DNS traffic even with externalOnly flag
+		if externalOnly != nil && *externalOnly && !isDNSTraffic && isInternalIP(dstIP, internalNetworkPrefixes) {
 			continue
 		}
 
@@ -186,6 +199,21 @@ func outputPlain(m []statEntry) string {
 
 		if v.Comm != "" {
 			sb.WriteString(fmt.Sprintf(", comm: %v", v.Comm))
+		}
+
+		// Add DNS origin information if available
+		if v.DNSOriginPid > 0 || v.DNSOriginComm != "" || v.DNSOriginPod != "" {
+			sb.WriteString(" [DNS Origin:")
+			if v.DNSOriginPid > 0 {
+				sb.WriteString(fmt.Sprintf(" pid: %d", v.DNSOriginPid))
+			}
+			if v.DNSOriginComm != "" {
+				sb.WriteString(fmt.Sprintf(" comm: %s", v.DNSOriginComm))
+			}
+			if v.DNSOriginPod != "" {
+				sb.WriteString(fmt.Sprintf(" pod: %s", v.DNSOriginPod))
+			}
+			sb.WriteString("]")
 		}
 
 		sb.WriteString("\n")
