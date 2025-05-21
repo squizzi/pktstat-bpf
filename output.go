@@ -74,11 +74,6 @@ func processMap(m *ebpf.Map, sortFunc func([]statEntry)) ([]statEntry, error) {
 			}
 		}
 
-		// Detect DNS traffic by port (both TCP and UDP to port 53)
-		if (key.Proto == 6 || key.Proto == 17) && key.DstPort == 53 { // TCP(6) or UDP(17) to port 53
-			isDNSTraffic = true
-		}
-
 		// Skip if external-only is enabled and destination IP is internal
 		// But always include DNS traffic even with externalOnly flag
 		if externalOnly != nil && *externalOnly && !isDNSTraffic && isInternalIP(dstIP, internalNetworkPrefixes) {
@@ -148,8 +143,10 @@ func dstIPSort(stats []statEntry) {
 	})
 }
 
-// outputJSONL formats the provided statEntry slice into a JSON Lines string.
-// Each entry is represented as a separate JSON object on its own line.
+// outputJSON formats the provided statEntry slice into a JSON string.
+//
+// The JSON is created using the encoding/json package, marshaling the statEntry
+// slice into a JSON array. The output is a string.
 //
 // Parameters:
 //
@@ -157,91 +154,11 @@ func dstIPSort(stats []statEntry) {
 //
 // Returns:
 //
-//	string - the JSON Lines string representation of m
-func outputJSONL(m []statEntry) string {
-	if len(m) == 0 {
-		return ""
-	}
+//	string - the JSON string representation of m
+func outputJSON(m []statEntry) string {
+	out, _ := json.Marshal(m)
 
-	var lines []string
-	for _, entry := range m {
-		entryJson, err := json.Marshal(entry)
-		if err != nil {
-			continue
-		}
-		lines = append(lines, string(entryJson))
-	}
-
-	return strings.Join(lines, "\n")
-}
-
-// outputMergedDNSJSONL formats merged DNS entries into JSON Lines format
-func outputMergedDNSJSONL(entries []mergedDNSEntry) string {
-	if len(entries) == 0 {
-		return ""
-	}
-
-	var lines []string
-	for _, entry := range entries {
-		entryJson, err := json.Marshal(entry)
-		if err != nil {
-			continue
-		}
-		lines = append(lines, string(entryJson))
-	}
-
-	return strings.Join(lines, "\n")
-}
-
-// outputMergedDNSPlain formats merged DNS entries into plain text format
-func outputMergedDNSPlain(entries []mergedDNSEntry) string {
-	if len(entries) == 0 {
-		return ""
-	}
-
-	var sb strings.Builder
-
-	for _, entry := range entries {
-		// Include hostname if available
-		if entry.QueryName != "" {
-			sb.WriteString(fmt.Sprintf("timestamp: %v, DNS query for '%s': %s:%d (%s) -> %s -> %s:%d\n",
-				entry.Timestamp,
-				entry.QueryName,
-				entry.OriginalSrcIP, entry.OriginalSrcPort,
-				valueOrDefault(entry.OriginalPod, "unknown pod"),
-				entry.DNSServerIP,
-				entry.ExternalDstIP, entry.ExternalDstPort))
-		} else {
-			sb.WriteString(fmt.Sprintf("timestamp: %v, DNS query: %s:%d (%s) -> %s -> %s:%d\n",
-				entry.Timestamp,
-				entry.OriginalSrcIP, entry.OriginalSrcPort,
-				valueOrDefault(entry.OriginalPod, "unknown pod"),
-				entry.DNSServerIP,
-				entry.ExternalDstIP, entry.ExternalDstPort))
-		}
-
-		if entry.OriginalComm != "" || entry.OriginalPid > 0 {
-			sb.WriteString(fmt.Sprintf("  origin process: %s (PID: %d)\n",
-				valueOrDefault(entry.OriginalComm, "unknown"), entry.OriginalPid))
-		}
-
-		if entry.DNSServerComm != "" || entry.DNSServerPid > 0 {
-			sb.WriteString(fmt.Sprintf("  dns server: %s (PID: %d)\n",
-				valueOrDefault(entry.DNSServerComm, "unknown"), entry.DNSServerPid))
-		}
-
-		sb.WriteString("\n")
-	}
-
-	return sb.String()
-}
-
-// valueOrDefault is a helper function to handle empty strings
-func valueOrDefault(value, defaultValue string) string {
-	if value == "" {
-		return defaultValue
-	}
-	return value
+	return string(out)
 }
 
 // outputPlain formats a slice of statEntry objects into a plain text string.

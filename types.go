@@ -46,33 +46,35 @@ type statEntry struct {
 	DNSOriginPod  string `json:"dnsOriginPod,omitempty"`
 }
 
-// mergedDNSEntry represents a merged view of internal and external DNS queries
-type mergedDNSEntry struct {
-	// Original requestor (pod/client) information
-	OriginalSrcIP   string    `json:"originalSrcIp"`
-	OriginalSrcPort uint16    `json:"originalSrcPort"`
-	OriginalPod     string    `json:"originalPod,omitempty"`
-	OriginalComm    string    `json:"originalComm,omitempty"`
-	OriginalPid     int32     `json:"originalPid,omitempty"`
-	Timestamp       time.Time `json:"timestamp"`
+// DNS event from eBPF
+type dnsLookupEvent struct {
+	AddrType uint32    // Address type (AF_INET or AF_INET6)
+	IP       [16]byte  // IP address (IPv4 or IPv6)
+	Host     [252]byte // Hostname
+	Pid      int32     // Process ID
+	Comm     [16]byte  // Process command
+}
 
-	// DNS server information
-	DNSServerIP   string `json:"dnsServerIp"`
-	DNSServerPod  string `json:"dnsServerPod,omitempty"`
-	DNSServerComm string `json:"dnsServerComm,omitempty"`
-	DNSServerPid  int32  `json:"dnsServerPid,omitempty"`
-
-	// External query information
-	ExternalDstIP   string `json:"externalDstIp,omitempty"`
-	ExternalDstPort uint16 `json:"externalDstPort,omitempty"`
-	Proto           string `json:"proto"`
-	LikelyService   string `json:"likelyService,omitempty"`
-
-	// DNS query information
-	QueryName string `json:"queryName,omitempty"` // The domain name being queried
+// DNS mapping entry to store hostname to IP mappings
+type dnsMapping struct {
+	Hostname    string     // The hostname that was resolved
+	IP          netip.Addr // The IP address it resolved to
+	Pid         int32      // Process ID that made the request
+	Comm        string     // Process command that made the request
+	Timestamp   time.Time  // When the resolution occurred
+	PodName     string     // Pod name if in Kubernetes environment
+	AddressType uint32     // AF_INET or AF_INET6
 }
 
 type kprobeHook struct {
 	prog   *ebpf.Program
 	kprobe string
+}
+
+type uprobeHook struct {
+	prog      *ebpf.Program
+	probeType string // "uretprobe" or "uprobe"
+	library   string // Path to the shared library containing the symbol
+	symbol    string // Name of the function to attach to
+	isReturn  bool   // True for uretprobe (function return), false for uprobe (function entry)
 }

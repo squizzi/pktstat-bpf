@@ -23,12 +23,8 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"net/netip"
 	"strings"
-	"time"
-
-	"github.com/cilium/ebpf"
 )
 
 var protoNumbers = map[uint8]string{
@@ -317,46 +313,4 @@ func portToLikelyServiceName(port uint16) string {
 		return v
 	}
 	return ""
-}
-
-// readDNSQueriesMap reads entries from the dns_queries map and updates our Go-side map
-// This function will be used after rebuilding the eBPF program with DNS tracking support
-func readDNSQueriesMap(dnsQueriesMap *ebpf.Map) {
-	if dnsQueriesMap == nil {
-		log.Printf("DNS queries map not available. Rebuild the program with DNS tracking support")
-		return
-	}
-
-	// Acquire lock for writing to dnsLookups
-	dnsLookupsMutex.Lock()
-	defer dnsLookupsMutex.Unlock()
-
-	var key uint32
-	var info DNSQueryInfo
-
-	// Iterate through all entries in the map
-	entries := dnsQueriesMap.Iterate()
-	for entries.Next(&key, &info) {
-		// Convert C string (null-terminated) to Go string
-		hostname := kernelStringToGo(info.Hostname[:])
-		comm := kernelStringToGo(info.Comm[:])
-
-		if hostname == "" {
-			continue
-		}
-
-		// Store hostname by PID/comm
-		lookupKey := fmt.Sprintf("%d:%s", info.Pid, comm)
-		dnsLookups[lookupKey] = hostname
-
-		// Store timestamp for cleanup
-		dnsLookupTimestamps[lookupKey] = time.Now()
-
-		log.Printf("Captured DNS query from PID %d (%s) for hostname: %s",
-			info.Pid, comm, hostname)
-	}
-
-	if err := entries.Err(); err != nil {
-		log.Printf("Error iterating DNS queries map: %v", err)
-	}
 }
