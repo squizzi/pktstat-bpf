@@ -30,7 +30,7 @@ import (
 	"time"
 
 	"github.com/cilium/ebpf"
-	"github.com/goccy/go-json"
+	json "github.com/goccy/go-json"
 )
 
 // processMap generates statEntry objects from an ebpf.Map.

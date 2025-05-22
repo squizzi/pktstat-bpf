@@ -28,6 +28,17 @@ import (
 	"github.com/cilium/ebpf"
 )
 
+type kprobeHook struct {
+	prog   *ebpf.Program
+	kprobe string
+}
+
+type uprobeHook struct {
+	prog      *ebpf.Program
+	symbol    string // Name of the function to attach to
+	probeType string // "uretprobe" or "uprobe"
+}
+
 type statEntry struct {
 	SrcIP         netip.Addr `json:"srcIp"`
 	DstIP         netip.Addr `json:"dstIp"`
@@ -46,35 +57,26 @@ type statEntry struct {
 	DNSOriginPod  string `json:"dnsOriginPod,omitempty"`
 }
 
-// DNS event from eBPF
+// dnsOriginMapping stores a mapping between a hostname and IP with a timestamp
+type dnsOriginMapping struct {
+	Hostname  string
+	IP        string
+	Timestamp time.Time
+}
+
+// dnsOrigin stores information about the original process that initiated a DNS request
+type dnsOrigin struct {
+	SrcIP     string
+	SrcPort   uint16
+	Pid       uint32
+	Comm      string
+	Timestamp time.Time
+	PodName   string
+}
+
+// dnsLookupEvent represents a DNS lookup event
 type dnsLookupEvent struct {
-	AddrType uint32    // Address type (AF_INET or AF_INET6)
-	IP       [16]byte  // IP address (IPv4 or IPv6)
-	Host     [252]byte // Hostname
-	Pid      int32     // Process ID
-	Comm     [16]byte  // Process command
-}
-
-// DNS mapping entry to store hostname to IP mappings
-type dnsMapping struct {
-	Hostname    string     // The hostname that was resolved
-	IP          netip.Addr // The IP address it resolved to
-	Pid         int32      // Process ID that made the request
-	Comm        string     // Process command that made the request
-	Timestamp   time.Time  // When the resolution occurred
-	PodName     string     // Pod name if in Kubernetes environment
-	AddressType uint32     // AF_INET or AF_INET6
-}
-
-type kprobeHook struct {
-	prog   *ebpf.Program
-	kprobe string
-}
-
-type uprobeHook struct {
-	prog      *ebpf.Program
-	probeType string // "uretprobe" or "uprobe"
-	library   string // Path to the shared library containing the symbol
-	symbol    string // Name of the function to attach to
-	isReturn  bool   // True for uretprobe (function return), false for uprobe (function entry)
+	AddrType uint32
+	IP       [16]uint8
+	Host     [252]byte
 }

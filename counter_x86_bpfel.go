@@ -24,8 +24,6 @@ type counterDnsLookupEvent struct {
 	AddrType uint32
 	Ip       [16]uint8
 	Host     [252]int8
-	Pid      int32
-	Comm     [16]int8
 }
 
 type counterSockinfo struct {

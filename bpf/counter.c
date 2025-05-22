@@ -90,11 +90,9 @@ static const __u8 ip4in6[] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff};
 
 // DNS lookup event structure
 typedef struct dns_lookup_event_t {
-  __u32 addr_type;          // Address type (AF_INET or AF_INET6)
-  __u8 ip[16];              // IP address (v4 or v6)
-  char host[252];           // Hostname
-  pid_t pid;                // Process ID
-  char comm[TASK_COMM_LEN]; // Process command
+  __u32 addr_type; // Address type (AF_INET or AF_INET6)
+  __u8 ip[16];     // IP address (v4 or v6)
+  char host[252];  // Hostname
 } dns_lookup_event;
 
 // Structure to temporarily store getaddrinfo arguments
@@ -1360,10 +1358,6 @@ int uretprobe__gethostbyname(struct pt_regs *ctx) {
     return 0; // Return early if NULL
   }
 
-  // Get process ID and command name
-  data->pid = bpf_get_current_pid_tgid() >> 32;
-  bpf_get_current_comm(&data->comm, sizeof(data->comm));
-
   // Read hostname
   char *hostnameptr = NULL;
   bpf_probe_read_user(&hostnameptr, sizeof(hostnameptr), &host->h_name);
@@ -1468,92 +1462,61 @@ int uprobe__getaddrinfo(struct pt_regs *ctx) {
  */
 SEC("uretprobe/getaddrinfo")
 int uretprobe__getaddrinfo(struct pt_regs *ctx) {
-  __u32 zero = 0;
+  dns_lookup_event data = {0};
+  addrinfo_args_cache *addrinfo_args = {0};
 
-  // Get a pointer to the per-CPU data
-  dns_lookup_event *data = bpf_map_lookup_elem(&dns_lookup_heap, &zero);
-  if (!data) {
-    return 0;
-  }
-
-  // Initialize event data
-  __builtin_memset(data, 0, sizeof(*data));
-
-  // Get thread ID
   u64 pid_tgid = bpf_get_current_pid_tgid();
   u32 tid = (u32)pid_tgid;
 
-  // Lookup saved arguments
-  addrinfo_args_cache *args = bpf_map_lookup_elem(&addrinfo_args_hash, &tid);
-  if (!args) {
-    return 0; // No saved arguments found
+  addrinfo_args = bpf_map_lookup_elem(&addrinfo_args_hash, &tid);
+
+  if (addrinfo_args == 0) {
+    return 0; // missed start
   }
 
-  // Check if getaddrinfo() returned successfully (return value is 0)
-  int ret = PT_REGS_RC(ctx);
-  if (ret != 0) {
-    // Resolution failed, clean up and return
-    bpf_map_delete_elem(&addrinfo_args_hash, &tid);
-    return 0;
-  }
+  struct addrinfo **res_p = {0};
+  bpf_probe_read(&res_p, sizeof(res_p), &addrinfo_args->addrinfo_ptr);
 
-  // Copy process info to event
-  data->pid = args->pid;
-  __builtin_memcpy(&data->comm, args->comm, sizeof(data->comm));
-
-  // Copy hostname to event
-  bpf_probe_read_kernel_str(&data->host, sizeof(data->host), &args->node);
-
-  // Get the addrinfo result
-  struct addrinfo **res_p = NULL;
-  bpf_probe_read_user(&res_p, sizeof(res_p), (void *)args->addrinfo_ptr);
-
-// Process up to MAX_IPS addresses
-#define MAX_IPS 30
+#pragma clang loop unroll(full)
   for (int i = 0; i < MAX_IPS; i++) {
-    struct addrinfo *res = NULL;
-    struct addrinfo *next = NULL;
-    bpf_probe_read_user(&res, sizeof(res), res_p);
-    if (!res) {
-      break; // No more results
+    struct addrinfo *res = {0};
+    bpf_probe_read(&res, sizeof(res), res_p);
+    if (res == NULL) {
+      goto out;
     }
+    bpf_probe_read(&data.addr_type, sizeof(data.addr_type), &res->ai_family);
 
-    // Get address family
-    bpf_probe_read_user(&data->addr_type, sizeof(data->addr_type),
-                        &res->ai_family);
+    if (data.addr_type == AF_INET) {
+      struct sockaddr_in *ipv4 = {0};
+      bpf_probe_read(&ipv4, sizeof(ipv4), &res->ai_addr);
+      // Only copy the 4 relevant bytes
+      bpf_probe_read_user(&data.ip, 4, &ipv4->sin_addr);
+    } else if (data.addr_type == AF_INET6) {
+      struct sockaddr_in6 *ipv6 = {0};
+      bpf_probe_read(&ipv6, sizeof(ipv6), &res->ai_addr);
 
-    // Extract IP address based on family
-    if (data->addr_type == AF_INET) {
-      // IPv4 address
-      struct sockaddr_in *ipv4 = NULL;
-      bpf_probe_read_user(&ipv4, sizeof(ipv4), &res->ai_addr);
-      bpf_probe_read_user(&data->ip, 4, &ipv4->sin_addr);
-    } else if (data->addr_type == AF_INET6) {
-      // IPv6 address
-      struct sockaddr_in6 *ipv6 = NULL;
-      bpf_probe_read_user(&ipv6, sizeof(ipv6), &res->ai_addr);
-      bpf_probe_read_user(&data->ip, sizeof(data->ip), &ipv6->sin6_addr);
+      bpf_probe_read_user(&data.ip, sizeof(data.ip), &ipv6->sin6_addr);
     } else {
-      // Skip unknown address types
-      goto next_addr;
+      goto out;
     }
 
-    // Submit event to ringbuffer
-    bpf_ringbuf_output(&dns_events, data, sizeof(*data), 0);
+    bpf_probe_read_kernel_str(&data.host, sizeof(data.host),
+                              &addrinfo_args->node);
 
-  next_addr:
-    // Move to next addrinfo in the linked list
-    bpf_probe_read_user(&next, sizeof(next), &res->ai_next);
-    if (!next) {
-      break; // End of list
+    bpf_ringbuf_output(&dns_events, &data, sizeof(data), 0);
+
+    struct addrinfo *next = {0};
+    bpf_probe_read(&next, sizeof(next), &res->ai_next);
+    if (next == NULL) {
+      goto out;
     }
     res_p = &next;
   }
 
-  // Clean up the saved arguments
+out:
   bpf_map_delete_elem(&addrinfo_args_hash, &tid);
 
   return 0;
 }
 
-char __license[] SEC("license") = "Dual MIT/GPL";
+char __license[] SEC("license") = "GPL";
