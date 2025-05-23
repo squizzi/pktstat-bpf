@@ -41,6 +41,7 @@ import (
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
+	json "github.com/goccy/go-json"
 )
 
 // Global variables for DNS tracking
@@ -191,13 +192,17 @@ func main() {
 		cancel()
 	}()
 
+	// Create DNS lookup map and mutex for sharing between goroutines
+	dnsLookupMap := make(map[uint32]string)
+	dnsLookupMapMutex := &sync.RWMutex{}
+
 	// Start a goroutine to process DNS events from the ringbuffer
 	dnsReader, err := ringbuf.NewReader(objs.DnsEvents)
 	if err != nil {
 		log.Printf("Failed to create ringbuf reader for DNS events: %v", err)
 	} else {
 		log.Printf("Created DNS events ringbuf reader successfully")
-		go processDNSEvents(ctx, dnsReader)
+		go processDNSEvents(ctx, dnsReader, dnsLookupMap, dnsLookupMapMutex)
 		defer dnsReader.Close()
 	}
 
@@ -206,7 +211,6 @@ func main() {
 	for {
 		select {
 		case <-ticker.C:
-			log.Printf("Ticker fired, processing map...")
 			// Process the map
 			entries, err := processMap(objs.PktCount, timeDateSort)
 			if err != nil {
@@ -214,17 +218,18 @@ func main() {
 				continue
 			}
 
-			log.Printf("Found %d entries in map", len(entries))
-
-			// Track DNS queries and their origins
-			trackDNSQueries(entries)
-
-			// Enrich with DNS origin information
-			enrichWithDNSOrigins(entries)
-
-			// Filter out entries we've already seen
+			// Filter out entries we've already seen and enrich with DNS data
 			var newEntries []statEntry
 			for _, entry := range entries {
+				// Enrich entry with DNS hostname if available
+				if entry.Pid != 0 {
+					dnsLookupMapMutex.RLock()
+					if hostname, exists := dnsLookupMap[uint32(entry.Pid)]; exists {
+						entry.DNSQueryName = hostname
+					}
+					dnsLookupMapMutex.RUnlock()
+				}
+
 				// Create unique keys for tracking seen entries
 				// For regular tracking (with timestamp)
 				timeKey := fmt.Sprintf("%s:%d->%s:%d:%s:%d:%s:%s",
@@ -259,18 +264,29 @@ func main() {
 				}
 			}
 
-			// Skip if no new entries
+			// Process DNS flow correlation
+			correlatedDNSEvents := processDNSFlow(entries, dnsLookupMap, dnsLookupMapMutex)
+
+			// Skip if no new entries or correlated DNS events
+			if len(newEntries) == 0 && len(correlatedDNSEvents) == 0 {
+				continue
+			}
+
+			// Output correlated DNS events first if any
+			if len(correlatedDNSEvents) > 0 {
+				for _, dnsEvent := range correlatedDNSEvents {
+					dnsJSON, _ := json.Marshal(dnsEvent)
+					fmt.Println(string(dnsJSON))
+				}
+			}
+
+			// Skip regular output if no new entries
 			if len(newEntries) == 0 {
 				continue
 			}
 
-			// Format output
-			var output string
-			if plainOutput != nil && *plainOutput {
-				output = outputPlain(newEntries)
-			} else {
-				output = outputJSON(newEntries)
-			}
+			// Format output as JSON Lines
+			output := outputJSON(newEntries)
 
 			// Add newline if needed
 			if output != "" && !strings.HasSuffix(output, "\n") {

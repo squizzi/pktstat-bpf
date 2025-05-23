@@ -39,21 +39,20 @@ type uprobeHook struct {
 }
 
 type statEntry struct {
-	SrcIP         netip.Addr `json:"srcIp"`
-	DstIP         netip.Addr `json:"dstIp"`
-	Proto         string     `json:"proto"`
-	Comm          string     `json:"comm,omitempty"`
-	Pid           int32      `json:"pid,omitempty"`
-	SrcPort       uint16     `json:"srcPort"`
-	DstPort       uint16     `json:"dstPort"`
-	LikelyService string     `json:"likelyService,omitempty"`
-	SourcePod     string     `json:"sourcePod,omitempty"`
-	DstPod        string     `json:"dstPod,omitempty"`
-	Timestamp     time.Time  `json:"timestamp"`
-	// DNS origin tracking fields
-	DNSOriginPid  int32  `json:"dnsOriginPid,omitempty"`
-	DNSOriginComm string `json:"dnsOriginComm,omitempty"`
-	DNSOriginPod  string `json:"dnsOriginPod,omitempty"`
+	Timestamp time.Time `json:"timestamp"`
+
+	SrcIP     netip.Addr `json:"srcIp"`
+	DstIP     netip.Addr `json:"dstIp"`
+	SrcPort   uint16     `json:"srcPort"`
+	DstPort   uint16     `json:"dstPort"`
+	Proto     string     `json:"proto"`
+	Comm      string     `json:"comm,omitempty"`
+	Pid       int32      `json:"pid,omitempty"`
+	SourcePod string     `json:"sourcePod,omitempty"`
+	DstPod    string     `json:"dstPod,omitempty"`
+
+	DNSQueryName  string `json:"dnsQueryName,omitempty"`
+	LikelyService string `json:"likelyService,omitempty"`
 }
 
 // dnsOriginMapping stores a mapping between a hostname and IP with a timestamp
@@ -80,4 +79,33 @@ type dnsLookupEvent struct {
 	Host     [252]byte
 	Pid      uint32
 	Comm     [16]byte
+}
+
+// dnsCorrelatedEvent represents a complete DNS flow from client to external DNS
+type dnsCorrelatedEvent struct {
+	// Original client information
+	OriginalSrcIP   string `json:"originalSrcIp"`
+	OriginalSrcPort uint16 `json:"originalSrcPort"`
+	OriginalPod     string `json:"originalPod"`
+	OriginalComm    string `json:"originalComm"`
+	OriginalPid     int32  `json:"originalPid"`
+
+	// Timestamp of the correlation
+	Timestamp time.Time `json:"timestamp"`
+
+	// DNS server information (e.g., CoreDNS)
+	DNSServerIP   string `json:"dnsServerIp"`
+	DNSServerComm string `json:"dnsServerComm"`
+	DNSServerPid  int32  `json:"dnsServerPid"`
+
+	// External destination information
+	ExternalDstIP   string `json:"externalDstIp"`
+	ExternalDstPort uint16 `json:"externalDstPort"`
+
+	// Protocol and service info
+	Proto         string `json:"proto"`
+	LikelyService string `json:"likelyService"`
+
+	// DNS query name if available
+	DNSQueryName string `json:"dnsQueryName,omitempty"`
 }

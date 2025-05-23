@@ -23,8 +23,6 @@ package main
 
 import (
 	"bytes"
-	"fmt"
-	"net/netip"
 	"sort"
 	"strings"
 	"time"
@@ -47,16 +45,6 @@ func processMap(m *ebpf.Map, sortFunc func([]statEntry)) ([]statEntry, error) {
 	stats := make([]statEntry, 0, m.MaxEntries())
 	iter := m.Iterate()
 
-	// Parse internal networks if external-only filtering is enabled
-	var internalNetworkPrefixes []netip.Prefix
-	if externalOnly != nil && *externalOnly && internalNetworks != nil {
-		var err error
-		internalNetworkPrefixes, err = parseInternalNetworks(*internalNetworks)
-		if err != nil {
-			return nil, fmt.Errorf("error parsing internal networks: %w", err)
-		}
-	}
-
 	// build statEntry slice converting data where needed
 	for iter.Next(&key, &val) {
 		srcIP := bytesToAddr(key.Srcip.In6U.U6Addr8)
@@ -76,7 +64,7 @@ func processMap(m *ebpf.Map, sortFunc func([]statEntry)) ([]statEntry, error) {
 
 		// Skip if external-only is enabled and destination IP is internal
 		// But always include DNS traffic even with externalOnly flag
-		if externalOnly != nil && *externalOnly && !isDNSTraffic && isInternalIP(dstIP, internalNetworkPrefixes) {
+		if externalOnly != nil && *externalOnly && !isDNSTraffic && !isExternalIP(dstIP) {
 			continue
 		}
 
@@ -121,32 +109,10 @@ func timeDateSort(stats []statEntry) {
 	})
 }
 
-// srcIPSort sorts a slice of statEntry objects by their SrcIP field in ascending order.
+// outputJSON formats the provided statEntry slice into JSON Lines format.
 //
-// Parameters:
-//
-//	stats []statEntry - the slice of statEntry objects to be sorted
-func srcIPSort(stats []statEntry) {
-	sort.Slice(stats, func(i, j int) bool {
-		return stats[i].SrcIP.Compare(stats[j].SrcIP) < 0
-	})
-}
-
-// dstIPSort sorts a slice of statEntry objects by their DstIP field in ascending order.
-//
-// Parameters:
-//
-//	stats []statEntry - the slice of statEntry objects to be sorted
-func dstIPSort(stats []statEntry) {
-	sort.Slice(stats, func(i, j int) bool {
-		return stats[i].DstIP.Compare(stats[j].DstIP) < 0
-	})
-}
-
-// outputJSON formats the provided statEntry slice into a JSON string.
-//
-// The JSON is created using the encoding/json package, marshaling the statEntry
-// slice into a JSON array. The output is a string.
+// JSON Lines format outputs each entry as a separate JSON object on its own line,
+// rather than as a JSON array. This is useful for streaming and processing large datasets.
 //
 // Parameters:
 //
@@ -154,69 +120,14 @@ func dstIPSort(stats []statEntry) {
 //
 // Returns:
 //
-//	string - the JSON string representation of m
+//	string - the JSON Lines string representation of m
 func outputJSON(m []statEntry) string {
-	out, _ := json.Marshal(m)
-
-	return string(out)
-}
-
-// outputPlain formats a slice of statEntry objects into a plain text string.
-// Each line represents a network flow with the following information:
-//   - Timestamp
-//   - Protocol (TCP, UDP, ICMPv4, IPv6-ICMP)
-//   - Source IP and port
-//   - Destination IP and port
-//   - ICMP type and code (for ICMP protocols)
-//   - Process ID (PID)
-//   - Command name (comm)
-//
-// The output is sorted chronologically by timestamp.
-//
-// Parameters:
-//
-//	m []statEntry - the statEntry slice to be formatted
-//
-// Returns:
-//
-//	string - the formatted string
-func outputPlain(m []statEntry) string {
 	var sb strings.Builder
 
-	for _, v := range m {
-		switch v.Proto {
-		case "ICMPv4", "IPv6-ICMP":
-			sb.WriteString(fmt.Sprintf("timestamp: %v, proto: %v, src: %v, dst: %v, type: %d, code: %d",
-				v.Timestamp, v.Proto, v.SrcIP, v.DstIP, v.SrcPort, v.DstPort))
-		default:
-			sb.WriteString(fmt.Sprintf("timestamp: %v, proto: %v, src: %v:%d, dst: %v:%d",
-				v.Timestamp, v.Proto, v.SrcIP, v.SrcPort, v.DstIP, v.DstPort))
-		}
-
-		if v.Pid > 0 {
-			sb.WriteString(fmt.Sprintf(", pid: %d", v.Pid))
-		}
-
-		if v.Comm != "" {
-			sb.WriteString(fmt.Sprintf(", comm: %v", v.Comm))
-		}
-
-		// Add DNS origin information if available
-		if v.DNSOriginPid > 0 || v.DNSOriginComm != "" || v.DNSOriginPod != "" {
-			sb.WriteString(" [DNS Origin:")
-			if v.DNSOriginPid > 0 {
-				sb.WriteString(fmt.Sprintf(" pid: %d", v.DNSOriginPid))
-			}
-			if v.DNSOriginComm != "" {
-				sb.WriteString(fmt.Sprintf(" comm: %s", v.DNSOriginComm))
-			}
-			if v.DNSOriginPod != "" {
-				sb.WriteString(fmt.Sprintf(" pod: %s", v.DNSOriginPod))
-			}
-			sb.WriteString("]")
-		}
-
-		sb.WriteString("\n")
+	for _, entry := range m {
+		jsonBytes, _ := json.Marshal(entry)
+		sb.Write(jsonBytes)
+		sb.WriteByte('\n')
 	}
 
 	return sb.String()

@@ -4,9 +4,21 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+// Global variables for enhanced DNS tracking
+var (
+	// Store internal DNS requests (client -> CoreDNS)
+	internalDNSRequests      = make(map[string]*dnsOrigin) // key: "srcIP:srcPort-dstIP:dstPort"
+	internalDNSRequestsMutex = &sync.RWMutex{}
+
+	// Store correlated DNS events
+	correlatedDNSEvents      = make([]dnsCorrelatedEvent, 0)
+	correlatedDNSEventsMutex = &sync.RWMutex{}
 )
 
 // detectDNSServices tries to identify DNS services in the Kubernetes cluster
@@ -35,9 +47,6 @@ func getDNSServiceIPs() ([]string, error) {
 
 	var ips []string
 
-	// Implementation will depend on the k8s client library being used
-	// This is a simplified approach
-
 	// Query services in all namespaces
 	services, err := kubeClient.CoreV1().Services("").List(context.Background(), metav1.ListOptions{})
 	if err != nil {
@@ -47,7 +56,7 @@ func getDNSServiceIPs() ([]string, error) {
 	// Look for services with port 53
 	for _, svc := range services.Items {
 		for _, port := range svc.Spec.Ports {
-			if port.Port == 53 && (port.Protocol == "UDP" || port.Protocol == "") {
+			if port.Port == 53 && (port.Protocol == "UDP" || port.Protocol == "TCP") {
 				if svc.Spec.ClusterIP != "" && svc.Spec.ClusterIP != "None" {
 					ips = append(ips, svc.Spec.ClusterIP)
 					log.Printf("Found DNS service: %s/%s at %s, will track internal DNS queries", svc.Namespace, svc.Name, svc.Spec.ClusterIP)
@@ -69,17 +78,21 @@ func isDNSServiceIP(ip string) bool {
 	return false
 }
 
-// trackDNSQueries processes entries to track DNS queries and their origins
-func trackDNSQueries(entries []statEntry) {
-	dnsRequestsMutex.Lock()
-	defer dnsRequestsMutex.Unlock()
+// processDNSFlow processes network entries to track and correlate DNS flows
+func processDNSFlow(entries []statEntry, dnsLookupMap map[uint32]string, dnsLookupMapMutex *sync.RWMutex) []dnsCorrelatedEvent {
+	internalDNSRequestsMutex.Lock()
+	defer internalDNSRequestsMutex.Unlock()
+
+	correlatedDNSEventsMutex.Lock()
+	defer correlatedDNSEventsMutex.Unlock()
+
+	var newCorrelatedEvents []dnsCorrelatedEvent
 
 	for _, entry := range entries {
-		// Check if this is a DNS query (UDP to port 53)
-		if (entry.Proto == "UDP" || entry.Proto == "TCP") && entry.DstPort == 53 {
-			// This is likely a DNS query, store the origin
-			key := fmt.Sprintf("%s:%d-%s:%d", entry.SrcIP, entry.SrcPort, entry.DstIP, entry.DstPort)
-			dnsRequestOrigins[key] = &dnsOrigin{
+		// Track internal DNS requests (client -> CoreDNS)
+		if (entry.Proto == "UDP" || entry.Proto == "TCP") && entry.DstPort == 53 && isDNSServiceIP(entry.DstIP.String()) {
+			key := fmt.Sprintf("%s:%d-%s:%d", entry.SrcIP.String(), entry.SrcPort, entry.DstIP.String(), entry.DstPort)
+			internalDNSRequests[key] = &dnsOrigin{
 				SrcIP:     entry.SrcIP.String(),
 				SrcPort:   entry.SrcPort,
 				Pid:       uint32(entry.Pid),
@@ -87,58 +100,71 @@ func trackDNSQueries(entries []statEntry) {
 				Timestamp: entry.Timestamp,
 				PodName:   entry.SourcePod,
 			}
-
-			// Log for debugging
-			log.Printf("Tracking DNS request from %s:%d (PID: %d, Comm: %s, Pod: %s) to %s:%d",
-				entry.SrcIP, entry.SrcPort, entry.Pid, entry.Comm, entry.SourcePod, entry.DstIP, entry.DstPort)
-
-			// For debugging purposes, also log if this is a DNS response
-		} else if (entry.Proto == "UDP" || entry.Proto == "TCP") && entry.SrcPort == 53 {
-			log.Printf("Detected DNS response from %s:%d to %s:%d",
-				entry.SrcIP, entry.SrcPort, entry.DstIP, entry.DstPort)
-		}
-	}
-
-	// Clean up old entries (older than 5 minutes)
-	now := time.Now()
-	for key, origin := range dnsRequestOrigins {
-		if now.Sub(origin.Timestamp) > 5*time.Minute {
-			delete(dnsRequestOrigins, key)
-		}
-	}
-}
-
-// enrichWithDNSOrigins adds DNS origin information to statEntry objects
-func enrichWithDNSOrigins(entries []statEntry) {
-	dnsRequestsMutex.RLock()
-	defer dnsRequestsMutex.RUnlock()
-
-	for i := range entries {
-		// Skip entries that already have command, PID information
-		if entries[i].Pid != 0 && entries[i].Comm != "" {
+			log.Printf("Tracking internal DNS request: %s:%d -> %s:%d (PID: %d, Comm: %s, Pod: %s)",
+				entry.SrcIP, entry.SrcPort, entry.DstIP, entry.DstPort, entry.Pid, entry.Comm, entry.SourcePod)
 			continue
 		}
 
-		// Skip if not to/from a DNS service
-		dstIsDNS := isDNSServiceIP(entries[i].DstIP.String())
-		srcIsDNS := isDNSServiceIP(entries[i].SrcIP.String())
+		// Track external DNS requests (CoreDNS -> External DNS)
+		if (entry.Proto == "UDP" || entry.Proto == "TCP") && entry.DstPort == 53 && isExternalIP(entry.DstIP) {
+			// This could be CoreDNS making an external request
+			// Try to correlate with a recent internal request
 
-		if !dstIsDNS && !srcIsDNS {
-			continue
-		}
+			// Look for matching internal requests that could have triggered this external request
+			for internalKey, origin := range internalDNSRequests {
+				// Check if this external request happened soon after the internal one
+				if time.Since(origin.Timestamp) < 10*time.Second {
+					// Get DNS query name if available
+					var queryName string
+					if origin.Pid > 0 {
+						dnsLookupMapMutex.RLock()
+						if hostname, exists := dnsLookupMap[origin.Pid]; exists {
+							queryName = hostname
+						}
+						dnsLookupMapMutex.RUnlock()
+					}
 
-		// If this is a packet FROM a DNS server (response), try to correlate with origin
-		if srcIsDNS {
-			for _, origin := range dnsRequestOrigins {
-				// If we find a matching origin, enrich the entry
-				if time.Since(origin.Timestamp) < 5*time.Minute {
-					// Update the entry with the original requester info
-					entries[i].DNSOriginPid = int32(origin.Pid)
-					entries[i].DNSOriginComm = origin.Comm
-					entries[i].DNSOriginPod = origin.PodName
+					// Create a correlated event
+					correlatedEvent := dnsCorrelatedEvent{
+						OriginalSrcIP:   origin.SrcIP,
+						OriginalSrcPort: origin.SrcPort,
+						OriginalPod:     origin.PodName,
+						OriginalComm:    origin.Comm,
+						OriginalPid:     int32(origin.Pid),
+						Timestamp:       entry.Timestamp,
+						DNSServerIP:     entry.SrcIP.String(),
+						DNSServerComm:   entry.Comm,
+						DNSServerPid:    entry.Pid,
+						ExternalDstIP:   entry.DstIP.String(),
+						ExternalDstPort: entry.DstPort,
+						Proto:           entry.Proto,
+						LikelyService:   entry.LikelyService,
+						DNSQueryName:    queryName,
+					}
+
+					correlatedDNSEvents = append(correlatedDNSEvents, correlatedEvent)
+					newCorrelatedEvents = append(newCorrelatedEvents, correlatedEvent)
+
+					log.Printf("DNS Flow Correlation: Client %s:%d (%s, %s) -> DNS Server %s (%s, PID:%d) -> External %s:%d [Query: %s]",
+						origin.SrcIP, origin.SrcPort, origin.Comm, origin.PodName,
+						entry.SrcIP.String(), entry.Comm, entry.Pid,
+						entry.DstIP.String(), entry.DstPort, queryName)
+
+					// Remove the internal request as it's been correlated
+					delete(internalDNSRequests, internalKey)
 					break
 				}
 			}
 		}
 	}
+
+	// Clean up old internal DNS requests (older than 30 seconds)
+	now := time.Now()
+	for key, origin := range internalDNSRequests {
+		if now.Sub(origin.Timestamp) > 30*time.Second {
+			delete(internalDNSRequests, key)
+		}
+	}
+
+	return newCorrelatedEvents
 }

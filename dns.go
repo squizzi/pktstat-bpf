@@ -6,14 +6,13 @@ import (
 	"encoding/binary"
 	"errors"
 	"log"
-	"net"
-	"syscall"
+	"sync"
 	"time"
 
 	"github.com/cilium/ebpf/ringbuf"
 )
 
-func processDNSEvents(ctx context.Context, reader *ringbuf.Reader) error {
+func processDNSEvents(ctx context.Context, reader *ringbuf.Reader, dnsLookupMap map[uint32]string, dnsLookupMapMutex *sync.RWMutex) error {
 	perfChan := make(chan []byte, 0)
 
 	go func(perfChan chan []byte, reader *ringbuf.Reader) {
@@ -42,7 +41,6 @@ func processDNSEvents(ctx context.Context, reader *ringbuf.Reader) error {
 		case <-time.After(1 * time.Millisecond):
 			continue
 		case <-ctx.Done():
-			log.Printf("Context done, exiting")
 			return nil
 		default:
 			record, ok := <-perfChan
@@ -55,28 +53,13 @@ func processDNSEvents(ctx context.Context, reader *ringbuf.Reader) error {
 				continue
 			}
 
-			// Extract null-terminated strings
 			hostname := nullTerminatedString(event.Host[:])
-			commName := nullTerminatedString(event.Comm[:])
 
-			// Create IP address string based on address type
-			var ipStr string
-			if event.AddrType == 0 {
-				// This is a pre-resolution event (from uprobe/gethostbyname)
-				log.Printf("DNS Lookup: Process %s (PID %d) looking up hostname: %s",
-					commName, event.Pid, hostname)
-			} else if event.AddrType == syscall.AF_INET {
-				// IPv4 address
-				ip := net.IPv4(event.IP[0], event.IP[1], event.IP[2], event.IP[3])
-				ipStr = ip.String()
-				log.Printf("DNS Resolution: Process %s (PID %d) resolved %s to IPv4: %s",
-					commName, event.Pid, hostname, ipStr)
-			} else if event.AddrType == syscall.AF_INET6 {
-				// IPv6 address
-				ip := net.IP(event.IP[:])
-				ipStr = ip.String()
-				log.Printf("DNS Resolution: Process %s (PID %d) resolved %s to IPv6: %s",
-					commName, event.Pid, hostname, ipStr)
+			// Store PID to hostname mapping for all DNS events that have a hostname
+			if hostname != "" {
+				dnsLookupMapMutex.Lock()
+				dnsLookupMap[event.Pid] = hostname
+				dnsLookupMapMutex.Unlock()
 			}
 		}
 	}

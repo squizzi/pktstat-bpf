@@ -314,3 +314,28 @@ func portToLikelyServiceName(port uint16) string {
 	}
 	return ""
 }
+
+// isExternalIP checks if an IP is external (not in common internal ranges)
+func isExternalIP(ip netip.Addr) bool {
+	// Check if it's in common internal ranges
+	internalPrefixes := []string{
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+		"127.0.0.0/8",
+		"169.254.0.0/16", // link-local
+		"224.0.0.0/4",    // multicast
+		"::1/128",        // IPv6 loopback
+		"fe80::/10",      // IPv6 link-local
+		"fc00::/7",       // IPv6 unique local
+	}
+
+	for _, prefix := range internalPrefixes {
+		if p, err := netip.ParsePrefix(prefix); err == nil {
+			if p.Contains(ip) {
+				return false
+			}
+		}
+	}
+	return true
+}
