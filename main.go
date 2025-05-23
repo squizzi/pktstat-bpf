@@ -140,19 +140,20 @@ func main() {
 
 	upHooks := []uprobeHook{
 		{
-			symbol:    "getaddrinfo",
-			prog:      objs.UprobeGetaddrinfo,
-			probeType: "uprobe",
+			symbol: "getaddrinfo",
+			prog:   objs.UprobeGetaddrinfo,
 		},
 		{
-			symbol:    "getaddrinfo",
-			prog:      objs.UretprobeGetaddrinfo,
-			probeType: "uretprobe",
+			symbol: "gethostbyname",
+			prog:   objs.UprobeGethostbyname2,
 		},
 		{
-			symbol:    "gethostbyname",
-			prog:      objs.UretprobeGethostbyname,
-			probeType: "uretprobe",
+			symbol: "gethostbyname2",
+			prog:   objs.UprobeGethostbyname2,
+		},
+		{
+			symbol: "gethostbyname_r",
+			prog:   objs.UprobeGethostbynameR,
 		},
 	}
 
@@ -163,14 +164,10 @@ func main() {
 	}
 
 	for _, up := range upHooks {
-		log.Printf("Attaching %s to %s", up.probeType, up.symbol)
+		log.Printf("Attaching UProbe: %s", up.symbol)
 
 		var l link.Link
-		if up.probeType == "uprobe" {
-			l, err = ex.Uprobe(up.symbol, up.prog, nil)
-		} else {
-			l, err = ex.Uretprobe(up.symbol, up.prog, nil)
-		}
+		l, err = ex.Uprobe(up.symbol, up.prog, nil)
 		if err != nil {
 			log.Fatalf("Failed to attach uprobe: %v", err)
 		}
@@ -178,7 +175,6 @@ func main() {
 		defer l.Close()
 
 		links = append(links, l)
-		log.Printf("Successfully attached %s to %s", up.probeType, up.symbol)
 	}
 
 	signalCh := make(chan os.Signal, 1)

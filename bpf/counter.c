@@ -29,6 +29,8 @@
 #include <bpf/bpf_tracing.h>
 
 #define MAX_ENTRIES 4096
+#define MAX_IPS 30
+#define MAX_ALIASES 5
 
 #define s6_addr in6_u.u6_addr8
 #define s6_addr16 in6_u.u6_addr16
@@ -90,9 +92,11 @@ static const __u8 ip4in6[] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff};
 
 // DNS lookup event structure
 typedef struct dns_lookup_event_t {
-  __u32 addr_type; // Address type (AF_INET or AF_INET6)
-  __u8 ip[16];     // IP address (v4 or v6)
-  char host[252];  // Hostname
+  __u32 addr_type;          // Address type (AF_INET or AF_INET6)
+  __u8 ip[16];              // IP address (v4 or v6)
+  char host[252];           // Hostname
+  pid_t pid;                // Process ID
+  char comm[TASK_COMM_LEN]; // Process command name
 } dns_lookup_event;
 
 // Structure to temporarily store getaddrinfo arguments
@@ -309,7 +313,7 @@ static inline void process_eth(void *data, void *data_end, __u64 pkt_len) {
 
   // validate Ethernet size
   if ((void *)eth + sizeof(*eth) > data_end) {
-    // bpf_printk("size validation failure");
+    // size validation failure
     return;
   }
 
@@ -338,7 +342,7 @@ static inline void process_eth(void *data, void *data_end, __u64 pkt_len) {
     break;
   }
   default:
-    // bpf_printk("wrong packet type: %d", eth->h_proto);
+    // wrong packet type
     return;
   }
 
@@ -400,7 +404,7 @@ static inline void process_cgroup_skb(struct __sk_buff *skb) {
     break;
   }
   default:
-    // bpf_printk("wrong packet type: %d", skb->protocol);
+    // wrong packet type
     return;
   }
 
@@ -1335,186 +1339,117 @@ int BPF_KPROBE(ip_output_fn, struct net *net, struct sock *sk,
 }
 
 /**
- * Hook for gethostbyname() library call.
- * Emits DNS lookup events containing the hostname and resolved IPs.
+ * Hook for getaddrinfo() calls to get DNS lookup events.
  */
-SEC("uretprobe/gethostbyname")
-int uretprobe__gethostbyname(struct pt_regs *ctx) {
-  __u32 zero = 0;
-  __u32 one = 1;
+SEC("uprobe/getaddrinfo")
+int uprobe__getaddrinfo(struct pt_regs *ctx) {
+  dns_lookup_event *data;
 
-  // Get a pointer to the per-CPU data for main event
-  dns_lookup_event *data = bpf_map_lookup_elem(&dns_lookup_heap, &zero);
+  data = bpf_ringbuf_reserve(&dns_events, sizeof(dns_lookup_event), 0);
   if (!data) {
     return 0;
   }
 
-  // Initialize event data
-  __builtin_memset(data, 0, sizeof(*data));
+  data->pid = bpf_get_current_pid_tgid() >> 32;
+  bpf_get_current_comm(&data->comm, sizeof(data->comm));
 
-  // Get return value (hostent struct pointer)
-  struct hostent *host = (struct hostent *)PT_REGS_RC(ctx);
-  if (!host) {
-    return 0; // Return early if NULL
-  }
+  bpf_probe_read_user_str(&data->host, sizeof(data->host),
+                          (char *)PT_REGS_PARM1(ctx));
 
-  // Read hostname
-  char *hostnameptr = NULL;
-  bpf_probe_read_user(&hostnameptr, sizeof(hostnameptr), &host->h_name);
-  bpf_probe_read_user_str(&data->host, sizeof(data->host), hostnameptr);
-
-  // Read IP addresses
-  char **ips = NULL;
-  bpf_probe_read_user(&ips, sizeof(ips), &host->h_addr_list);
-
-  // Read address type
-  bpf_probe_read_user(&data->addr_type, sizeof(data->addr_type),
-                      &host->h_addrtype);
-
-// Process up to MAX_IPS addresses
-#define MAX_IPS 30
-  for (int i = 0; i < MAX_IPS; i++) {
-    char *ip = NULL;
-    bpf_probe_read_user(&ip, sizeof(ip), &ips[i]);
-    if (!ip) {
-      break; // No more addresses
-    }
-
-    if (data->addr_type == AF_INET) {
-      // IPv4 address
-      bpf_probe_read_user(&data->ip, 4, ip);
-    } else if (data->addr_type == AF_INET6) {
-      // IPv6 address
-      bpf_probe_read_user(&data->ip, sizeof(data->ip), ip);
-    } else {
-      continue; // Skip unknown address types
-    }
-
-    // Submit event to ringbuffer
-    bpf_ringbuf_output(&dns_events, data, sizeof(*data), 0);
-
-// Also read aliases
-#define MAX_ALIASES 5
-    char **aliases = NULL;
-    bpf_probe_read_user(&aliases, sizeof(aliases), &host->h_aliases);
-
-    // Get pointer to alias data in per-CPU array
-    dns_lookup_event *alias_data = bpf_map_lookup_elem(&dns_lookup_heap, &one);
-    if (!alias_data) {
-      continue; // Skip if can't get alias data buffer
-    }
-
-    for (int j = 0; j < MAX_ALIASES; j++) {
-      char *alias = NULL;
-      bpf_probe_read_user(&alias, sizeof(alias), &aliases[j]);
-      if (!alias) {
-        break; // No more aliases
-      }
-
-      // Copy main event data to alias data
-      __builtin_memcpy(alias_data, data, sizeof(*alias_data));
-
-      // Set the alias as hostname
-      bpf_probe_read_user_str(&alias_data->host, sizeof(alias_data->host),
-                              alias);
-
-      // Submit alias event
-      bpf_ringbuf_output(&dns_events, alias_data, sizeof(*alias_data), 0);
-    }
-  }
+  bpf_ringbuf_submit(data, 0);
 
   return 0;
 }
 
 /**
- * Hook for getaddrinfo() library call to capture arguments.
+ * Hook for gethostbyname() library call to capture DNS lookup events.
  */
-SEC("uprobe/getaddrinfo")
-int uprobe__getaddrinfo(struct pt_regs *ctx) {
-  addrinfo_args_cache args = {0};
+SEC("uprobe/gethostbyname")
+int uprobe__gethostbyname(struct pt_regs *ctx) {
+  // Create a DNS lookup event
+  dns_lookup_event data = {0};
 
-  // Check if parameters are valid
-  if (!PT_REGS_PARM1(ctx) || !PT_REGS_PARM4(ctx)) {
+  // Get process information and fill in command name
+  u64 pid_tgid = bpf_get_current_pid_tgid();
+  data.pid = pid_tgid >> 32; // Extract PID from pid_tgid
+  bpf_get_current_comm(&data.comm, sizeof(data.comm)); // Get command name
+
+  // Mark this as a pre-resolution event
+  data.addr_type = 0;
+
+  // Get the hostname from the first parameter
+  char *hostname = (char *)PT_REGS_PARM1(ctx);
+  if (!hostname) {
     return 0;
   }
 
-  // Get thread ID
-  u64 pid_tgid = bpf_get_current_pid_tgid();
-  u32 tid = (u32)pid_tgid;
+  // Read the hostname into our event structure
+  bpf_probe_read_user_str(&data.host, sizeof(data.host), hostname);
 
-  // Get process ID and command name
-  args.pid = pid_tgid >> 32;
-  bpf_get_current_comm(&args.comm, sizeof(args.comm));
-
-  // Save getaddrinfo parameters as u64
-  args.addrinfo_ptr = (u64)PT_REGS_PARM4(ctx);
-  bpf_probe_read_user_str(&args.node, sizeof(args.node),
-                          (char *)PT_REGS_PARM1(ctx));
-
-  // Save to hash map for later lookup in the return probe
-  bpf_map_update_elem(&addrinfo_args_hash, &tid, &args, 0);
+  // Output the event to the ring buffer
+  bpf_ringbuf_output(&dns_events, &data, sizeof(data), 0);
 
   return 0;
 }
 
 /**
- * Hook for getaddrinfo() library call return to process resolved addresses.
+ * Hook for gethostbyname2() library call to capture DNS lookup events.
  */
-SEC("uretprobe/getaddrinfo")
-int uretprobe__getaddrinfo(struct pt_regs *ctx) {
+SEC("uprobe/gethostbyname2")
+int uprobe__gethostbyname2(struct pt_regs *ctx) {
+  // Create a DNS lookup event
   dns_lookup_event data = {0};
-  addrinfo_args_cache *addrinfo_args = {0};
 
+  // Get process information and fill in command name
   u64 pid_tgid = bpf_get_current_pid_tgid();
-  u32 tid = (u32)pid_tgid;
+  data.pid = pid_tgid >> 32; // Extract PID from pid_tgid
+  bpf_get_current_comm(&data.comm, sizeof(data.comm)); // Get command name
 
-  addrinfo_args = bpf_map_lookup_elem(&addrinfo_args_hash, &tid);
+  // Mark this as a pre-resolution event
+  data.addr_type = 0;
 
-  if (addrinfo_args == 0) {
-    return 0; // missed start
+  // Get the hostname from the first parameter (same as gethostbyname)
+  char *hostname = (char *)PT_REGS_PARM1(ctx);
+  if (!hostname) {
+    return 0;
   }
 
-  struct addrinfo **res_p = {0};
-  bpf_probe_read(&res_p, sizeof(res_p), &addrinfo_args->addrinfo_ptr);
+  // Read the hostname into our event structure
+  bpf_probe_read_user_str(&data.host, sizeof(data.host), hostname);
 
-#pragma clang loop unroll(full)
-  for (int i = 0; i < MAX_IPS; i++) {
-    struct addrinfo *res = {0};
-    bpf_probe_read(&res, sizeof(res), res_p);
-    if (res == NULL) {
-      goto out;
-    }
-    bpf_probe_read(&data.addr_type, sizeof(data.addr_type), &res->ai_family);
+  // Output the event to the ring buffer
+  bpf_ringbuf_output(&dns_events, &data, sizeof(data), 0);
 
-    if (data.addr_type == AF_INET) {
-      struct sockaddr_in *ipv4 = {0};
-      bpf_probe_read(&ipv4, sizeof(ipv4), &res->ai_addr);
-      // Only copy the 4 relevant bytes
-      bpf_probe_read_user(&data.ip, 4, &ipv4->sin_addr);
-    } else if (data.addr_type == AF_INET6) {
-      struct sockaddr_in6 *ipv6 = {0};
-      bpf_probe_read(&ipv6, sizeof(ipv6), &res->ai_addr);
+  return 0;
+}
 
-      bpf_probe_read_user(&data.ip, sizeof(data.ip), &ipv6->sin6_addr);
-    } else {
-      goto out;
-    }
+/**
+ * Hook for gethostbyname_r() library call to capture DNS lookup events.
+ */
+SEC("uprobe/gethostbyname_r")
+int uprobe__gethostbyname_r(struct pt_regs *ctx) {
+  // Create a DNS lookup event
+  dns_lookup_event data = {0};
 
-    bpf_probe_read_kernel_str(&data.host, sizeof(data.host),
-                              &addrinfo_args->node);
+  // Get process information and fill in command name
+  u64 pid_tgid = bpf_get_current_pid_tgid();
+  data.pid = pid_tgid >> 32; // Extract PID from pid_tgid
+  bpf_get_current_comm(&data.comm, sizeof(data.comm)); // Get command name
 
-    bpf_ringbuf_output(&dns_events, &data, sizeof(data), 0);
+  // Mark this as a pre-resolution event
+  data.addr_type = 0;
 
-    struct addrinfo *next = {0};
-    bpf_probe_read(&next, sizeof(next), &res->ai_next);
-    if (next == NULL) {
-      goto out;
-    }
-    res_p = &next;
+  // Get the hostname from the first parameter (same as gethostbyname)
+  char *hostname = (char *)PT_REGS_PARM1(ctx);
+  if (!hostname) {
+    return 0;
   }
 
-out:
-  bpf_map_delete_elem(&addrinfo_args_hash, &tid);
+  // Read the hostname into our event structure
+  bpf_probe_read_user_str(&data.host, sizeof(data.host), hostname);
+
+  // Output the event to the ring buffer
+  bpf_ringbuf_output(&dns_events, &data, sizeof(data), 0);
 
   return 0;
 }

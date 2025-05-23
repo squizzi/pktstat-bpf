@@ -34,9 +34,8 @@ type kprobeHook struct {
 }
 
 type uprobeHook struct {
-	prog      *ebpf.Program
-	symbol    string // Name of the function to attach to
-	probeType string // "uretprobe" or "uprobe"
+	prog   *ebpf.Program
+	symbol string // Name of the function to attach to
 }
 
 type statEntry struct {
@@ -79,4 +78,6 @@ type dnsLookupEvent struct {
 	AddrType uint32
 	IP       [16]uint8
 	Host     [252]byte
+	Pid      uint32
+	Comm     [16]byte
 }
